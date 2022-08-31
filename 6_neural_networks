@@ -1,0 +1,882 @@
+################################################################################
+#  Title: Neural network prediction model code. Endpoint 2 - pseudovalues
+#  Project: OX129 - breast cancer risk prediction modelling
+#  Author: Ash Clift, 1st November 2021
+#  Input files: "OX129_endpoint2_stacked5_pseudovalues.dta"
+#       Stacked imputations from Endpoint2 imputed dataset  
+#  Version: 2, final, code checked. 1st March 2022. 
+################################################################################
+
+## First, we need to build the neural network. Then, perform IECV, and then evaluate the 
+# model's performance using those IECV-obtained predictions #
+
+## Load in packages needed ##
+library(survival)
+library(readr)
+library(stringr)
+library(caret)
+library(haven)
+library(ParBayesianOptimization)
+library(keras)
+library(tensorflow)
+
+# Check and set working directory for saving files ##
+getwd() 
+setwd("//data/final_datasets/ML/")
+
+## Load in data ##
+data <- read_dta("OX129_endpoint2_stacked5_pseudovalues.dta")
+str(data)
+
+## Categorical variables were converted into dummies where needed in Stata ##
+data$vasculitis              <- as.numeric(data$vasculitis)
+data$ssri                    <- as.numeric(data$ssri)
+data$ihd                     <- as.numeric(data$ihd)
+data$fibrocystic             <- as.numeric(data$fibrocystic) 
+data$fh_breastca             <- as.numeric(data$fh_breastca) 
+data$smoking_category1       <- as.numeric(data$smoking_category1)
+data$smoking_category2       <- as.numeric(data$smoking_category2)
+data$smoking_category3       <- as.numeric(data$smoking_category3)
+data$smoking_category4       <- as.numeric(data$smoking_category4)
+data$smoking_category5       <- as.numeric(data$smoking_category5)
+data$past_oestrogen_use1     <- as.numeric(data$past_oestrogen_use1)
+data$past_oestrogen_use2     <- as.numeric(data$past_oestrogen_use2)
+data$past_oestrogen_use3     <- as.numeric(data$past_oestrogen_use3)
+data$past_oestrogen_use4     <- as.numeric(data$past_oestrogen_use4)
+data$past_oestrogen_use5     <- as.numeric(data$past_oestrogen_use5)
+data$past_oestrogen_use6     <- as.numeric(data$past_oestrogen_use6)
+data$past_combinedhrt_use1   <- as.numeric(data$past_combinedhrt_use1)
+data$past_combinedhrt_use2   <- as.numeric(data$past_combinedhrt_use2)
+data$past_combinedhrt_use3   <- as.numeric(data$past_combinedhrt_use3)
+data$past_combinedhrt_use4   <- as.numeric(data$past_combinedhrt_use4)
+data$past_combinedhrt_use5   <- as.numeric(data$past_combinedhrt_use5)
+data$past_combinedhrt_use6   <- as.numeric(data$past_combinedhrt_use6)
+
+## Set up the predictors and outcome ##
+## Set up X columns (predictors), and Y column ('target' pseudovalue) ##
+x_cols <- c('age', 'bmi', 'fibrocystic', 'smoking_category1', 'smoking_category2', 
+            'smoking_category3', 'smoking_category4', 'smoking_category5',
+            'past_oestrogen_use1', 'past_oestrogen_use2', 'past_oestrogen_use3', 
+            'past_oestrogen_use4', 'past_oestrogen_use5', 'past_oestrogen_use6', 
+            'past_combinedhrt_use1', 'past_combinedhrt_use2', 'past_combinedhrt_use3', 
+            'past_combinedhrt_use4', 'past_combinedhrt_use5', 'past_combinedhrt_use6', 
+            'fh_breastca', 'ihd', 'vasculitis', 'ssri')
+
+y_cols <- c('pseudo_crr')
+
+# Create scaling function - continuous variables are to be min-maxscaled to 
+# be between 0 and 1
+
+normalise <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+data$age                 <- normalise(data$age)
+data$bmi                 <- normalise(data$bmi)
+
+
+########################
+## Dataset formatting ##
+########################
+
+## Change dataset to a matrix  ##
+## x_train = predictor parameters ##
+x_train <- as.matrix(data[, x_cols])
+
+## Labels = the target for the neural net - the pseudovalues ##
+label_train <- as.matrix(data[, y_cols])
+
+## Number of predictors ##
+dim(x_train) 
+
+## clean up memory ##
+rm(data) 
+
+
+###############################################
+## Define custom loss function for the model ##
+###############################################
+
+## Define root mean squared error loss function ##
+## This is used to fit the neural network model ##
+
+rmse <- function(y_true, y_pred){
+  K <- backend()
+  loss <- K$sqrt(K$mean((y_true - y_pred)^2))
+  return(loss)
+}
+
+
+############################################################################
+## FULL MODEL: Setting up Bayesian optimisation for hyperparameter tuning ##
+############################################################################
+
+## First, we fit neural network to entirety of data; Bayesian optimisation ## 
+## used to identify optimal hyperparameters (with nested cross-val) ##
+
+## 1066 used throughout for reproducibility ##
+set.seed(1066)
+
+
+callback <- list(callback_reduce_lr_on_plateau(monitor="loss", factor=0.5, patience=2), 
+                 callback_early_stopping(monitor="loss", min_delta=0.0001, patience=3))
+
+## The Bayesian Optimisation package requires a 'scoring function' which ##
+## it uses to assess the performance of the different configurations ##
+
+scorefunction <- function(epochs, units, layers, learnrate) {
+  
+  set.seed(1066)
+  
+  k <- 5                                               ## 5-fold cross-validation 
+  indices <- sample(1:nrow(x_train))                   ## Used to randomly assign to folds 
+  folds <- cut(1:length(indices), breaks = k, labels = FALSE)  ## folds 
+  
+  cv_score <- c()                                      ## empty list to store 'scores' over each CV iteration 
+  
+  for (a in 1:k) {                                     ## Nested loop to perform CV
+    
+    cv_val_indices     <- which(folds==a)              ## validation set 1/5 folds 
+    cv_val_data        <- x_train[cv_val_indices, ]    ## Take from x_train 
+    cv_val_labels      <- label_train[cv_val_indices]  ## Take from labels 
+    
+    cv_train_data      <- x_train[-cv_val_indices, ]   ## Train data = 4/5 folds
+    cv_train_labels    <- label_train[-cv_val_indices] ## Train labels 4/5 
+    
+    cv_model <- keras_model_sequential()               ## Instantiate keras model 
+    for(b in 1:layers){                                ## loop added to vary number of hidden layers
+      cv_model %>% 
+        layer_dense(units = units, activation = 'relu', input_shape=c(24))                    
+    }
+    cv_model %>% layer_dense(units = 1, activation = 'linear') %>% 
+      compile(
+        optimizer = optimizer_adam(lr=learnrate),
+        loss = rmse,          
+        metrics = "mse"      
+      )
+      
+    ## Fit the model- batch size 8192 ##
+    cv_model %>% fit(cv_train_data, cv_train_labels, epochs=epochs, 
+                     batch_size=8192, verbose=2, callbacks = callback, 
+                     validation_data = list(cv_val_data, cv_val_labels)) 
+    
+    ## Generate predictions on held-out fold ##
+    cv_predictions <- predict(cv_model, cv_val_data)
+    
+    ## BO wants to find the maximum, but lower RMSE = better ##
+    ## -1 x RMSE: lower RMSE = higher value, so use this to score the config ##
+    negative_rmse <- -1*sqrt((mean((cv_predictions-cv_val_labels)^2)))
+
+    cv_score <- c(cv_score, negative_rmse)
+    
+    ## Clear out the model at the end of loop to avoid merging ##
+    rm(cv_model) 
+  }
+  ## BO needs score to be returned to it ##
+  return(list(Score = mean(cv_score)))
+}
+
+
+## Define hyperparameter search space - 'bounds' to search ##
+
+bounds <- list(
+  epochs = c(1L, 5L),             ## Number of times model gets fed the data
+  units = c(6L, 48L),             ## Number of nodes in each layer 
+  layers = c(1L, 5L),             ## Between 1 and 5 hidden layers
+  learnrate = c(0.001, 0.1)       ## default for Adam is 0.001, start there and go up
+)
+
+
+###############################################################################
+## FULL MODEL: Running Bayesian optimisation to find optimal hyperparameters ##
+###############################################################################
+
+## Define Bayesian Optimisation function and run it ##
+## Also keep track of time ##
+start <- Sys.time() 
+
+## Function takes in the scoring function we defined above, the bounds to ##
+## search within, number of 'initialisations' to run first, then the number ## 
+## of further iterations to try find the global optimum ##
+set.seed(1066) 
+
+bayesian_neural <- bayesOpt(
+  FUN = scorefunction, 
+  bounds = bounds, 
+  initPoints = 10, 
+  iters.n = 10,       ## small hyperparam search space, fewer iterations test (vs. 50 for XGBoost) 
+  iters.k = 1, 
+  parallel = FALSE, 
+  plotProgress = FALSE, 
+  verbose = 2, 
+  errorHandling = "continue", 
+  acq = "ei"
+)
+
+end <- Sys.time() 
+end-start 
+
+## Summarise Bayesian Optimisation run ##
+bayesian_neural$scoreSummary 
+
+bestpars <- getBestPars(bayesian_neural)
+bestpars 
+
+# Plot the summary #
+plot(bayesian_neural)
+
+# Extract optimal hyperparameter config to fit final model on whole dataset # 
+best_epochs <- bestpars[1]
+best_units <- bestpars[2]
+best_layers <- toString(bestpars[3])
+best_learnrate <- as.numeric(bestpars[4])
+
+best_epochs 
+best_units 
+best_layers 
+best_learnrate
+
+####################
+## Fit full model ##
+###################
+
+final_model <- keras_model_sequential()  
+    for(b in 1:best_layers){   
+      final_model %>% 
+        layer_dense(units = best_units, activation = 'relu', input_shape=c(24))                      
+    }
+    final_model %>% layer_dense(units = 1, activation = 'linear') %>% 
+      compile(
+        optimizer = optimizer_adam(lr=best_learnrate), 
+        loss = rmse,          
+        metrics = "mse"      
+      )
+## Basic characteristics of final model, e.g. number of layers, parameters ##
+summary(final_model) 
+
+## Fit the model with said config to whole dataset, and save it ##
+final_model %>% fit(x_train, label_train, epochs=best_epochs, 
+                    batch_size=8192, verbose=2)
+
+setwd("//models/Endpoint_2/")
+save_model_hdf5(final_model, "ep2_neuralnetwork_final.h5")
+
+rm(list=ls())
+
+#############################################################################################
+#############################################################################################
+
+
+###########################################################################################
+## Now, run the IECV so that we can evaluate how well this neural network approach works ## 
+###########################################################################################
+
+#############################
+## Load in packages needed ##
+#############################
+library(survival)
+library(readr)
+library(stringr)
+library(caret)
+library(haven)
+library(ParBayesianOptimization) 
+library(keras)
+library(tensorflow)
+
+
+########################################################
+## Check and set working directory for importing data ##
+########################################################
+## Here, we need to separately import and format the Period 1 and Period 2 data ##
+getwd() 
+setwd("//data/final_datasets/ML/")
+
+data_period1 <- read_dta("OX129_endpoint2_stacked5_period1_pseudovalues.dta")
+
+## Categorical variables were converted into dummies where needed in Stata ##
+data_period1$vasculitis              <- as.numeric(data_period1$vasculitis)
+data_period1$ssri                    <- as.numeric(data_period1$ssri)
+data_period1$ihd                     <- as.numeric(data_period1$ihd)
+data_period1$fibrocystic             <- as.numeric(data_period1$fibrocystic) 
+data_period1$fh_breastca             <- as.numeric(data_period1$fh_breastca) 
+data_period1$smoking_category1       <- as.numeric(data_period1$smoking_category1)
+data_period1$smoking_category2       <- as.numeric(data_period1$smoking_category2)
+data_period1$smoking_category3       <- as.numeric(data_period1$smoking_category3)
+data_period1$smoking_category4       <- as.numeric(data_period1$smoking_category4)
+data_period1$smoking_category5       <- as.numeric(data_period1$smoking_category5)
+data_period1$past_oestrogen_use1     <- as.numeric(data_period1$past_oestrogen_use1)
+data_period1$past_oestrogen_use2     <- as.numeric(data_period1$past_oestrogen_use2)
+data_period1$past_oestrogen_use3     <- as.numeric(data_period1$past_oestrogen_use3)
+data_period1$past_oestrogen_use4     <- as.numeric(data_period1$past_oestrogen_use4)
+data_period1$past_oestrogen_use5     <- as.numeric(data_period1$past_oestrogen_use5)
+data_period1$past_oestrogen_use6     <- as.numeric(data_period1$past_oestrogen_use6)
+data_period1$past_combinedhrt_use1   <- as.numeric(data_period1$past_combinedhrt_use1)
+data_period1$past_combinedhrt_use2   <- as.numeric(data_period1$past_combinedhrt_use2)
+data_period1$past_combinedhrt_use3   <- as.numeric(data_period1$past_combinedhrt_use3)
+data_period1$past_combinedhrt_use4   <- as.numeric(data_period1$past_combinedhrt_use4)
+data_period1$past_combinedhrt_use5   <- as.numeric(data_period1$past_combinedhrt_use5)
+data_period1$past_combinedhrt_use6   <- as.numeric(data_period1$past_combinedhrt_use6)
+data_period1$sha1                    <- as.factor(data_period1$sha1)
+
+## Set up the predictors and outcome ##
+## Set up X columns (predictors), and Y column (target pseudovalue) ##
+x_cols <- c('age', 'bmi', 'fibrocystic', 'smoking_category1', 'smoking_category2', 
+            'smoking_category3', 'smoking_category4', 'smoking_category5',
+            'past_oestrogen_use1', 'past_oestrogen_use2', 'past_oestrogen_use3', 
+            'past_oestrogen_use4', 'past_oestrogen_use5', 'past_oestrogen_use6', 
+            'past_combinedhrt_use1', 'past_combinedhrt_use2', 'past_combinedhrt_use3', 
+            'past_combinedhrt_use4', 'past_combinedhrt_use5', 'past_combinedhrt_use6', 
+            'fh_breastca', 'ihd', 'vasculitis', 'ssri')
+
+y_cols <- c('period1_pseudo')
+
+# Create normalise function - continuous variables are to be normalised/scaled to 
+# be between 0 and 1
+
+normalise <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+data_period1$age                 <- normalise(data_period1$age)
+data_period1$bmi                 <- normalise(data_period1$bmi)
+
+###################################
+## Repeat, but for period 2 data ##
+###################################
+
+data_period2 <- read_dta("OX129_endpoint2_stacked5_period2_pseudovalues.dta")
+
+## Categorical variables were converted into dummies where needed in Stata ##
+data_period2$vasculitis              <- as.numeric(data_period2$vasculitis)
+data_period2$ssri                    <- as.numeric(data_period2$ssri)
+data_period2$ihd                     <- as.numeric(data_period2$ihd)
+data_period2$fibrocystic             <- as.numeric(data_period2$fibrocystic) 
+data_period2$fh_breastca             <- as.numeric(data_period2$fh_breastca) 
+data_period2$smoking_category1       <- as.numeric(data_period2$smoking_category1)
+data_period2$smoking_category2       <- as.numeric(data_period2$smoking_category2)
+data_period2$smoking_category3       <- as.numeric(data_period2$smoking_category3)
+data_period2$smoking_category4       <- as.numeric(data_period2$smoking_category4)
+data_period2$smoking_category5       <- as.numeric(data_period2$smoking_category5)
+data_period2$past_oestrogen_use1     <- as.numeric(data_period2$past_oestrogen_use1)
+data_period2$past_oestrogen_use2     <- as.numeric(data_period2$past_oestrogen_use2)
+data_period2$past_oestrogen_use3     <- as.numeric(data_period2$past_oestrogen_use3)
+data_period2$past_oestrogen_use4     <- as.numeric(data_period2$past_oestrogen_use4)
+data_period2$past_oestrogen_use5     <- as.numeric(data_period2$past_oestrogen_use5)
+data_period2$past_oestrogen_use6     <- as.numeric(data_period2$past_oestrogen_use6)
+data_period2$past_combinedhrt_use1   <- as.numeric(data_period2$past_combinedhrt_use1)
+data_period2$past_combinedhrt_use2   <- as.numeric(data_period2$past_combinedhrt_use2)
+data_period2$past_combinedhrt_use3   <- as.numeric(data_period2$past_combinedhrt_use3)
+data_period2$past_combinedhrt_use4   <- as.numeric(data_period2$past_combinedhrt_use4)
+data_period2$past_combinedhrt_use5   <- as.numeric(data_period2$past_combinedhrt_use5)
+data_period2$past_combinedhrt_use6   <- as.numeric(data_period2$past_combinedhrt_use6)
+data_period2$sha1                    <- as.factor(data_period2$sha1)
+
+z_cols <- c('period2_pseudo')
+
+data_period2$age                 <- normalise(data_period2$age)
+data_period2$bmi                 <- normalise(data_period2$bmi)
+
+###############################################
+## Define custom loss function for the model ##
+###############################################
+
+## Define root mean squared error loss function ##
+
+rmse <- function(y_true, y_pred){
+  K <- backend()
+  loss <- K$sqrt(K$mean((y_true - y_pred)^2))
+  return(loss)
+}
+
+######################
+## Set up callbacks ##
+######################
+## 1066 used throughout ##
+set.seed(1066)
+
+callback <- list(callback_reduce_lr_on_plateau(monitor="loss", factor=0.5, patience=2),
+                 callback_early_stopping(monitor="loss", min_delta=0.0001, patience=3))
+
+
+###################################################
+## Set up Bayesian Optimisation scoring function ##
+###################################################
+
+
+scorefunction <- function(epochs, units, layers, learnrate) {
+  
+  set.seed(1066)
+  
+  k <- 5                                                       ## 5-fold cross-validation 
+  indices <- sample(1:nrow(data_fit))                          ## Used to randomly assign to folds 
+  folds <- cut(1:length(indices), breaks = k, labels = FALSE)  ## folds 
+  
+  iecv_score <- c()                                            ## empty list to store 'scores' over each CV iteration 
+  
+  for (a in 1:k) {                                             ## Nested loop to perform CV
+    
+    iecv_val_indices     <- which(folds==a)                    ## validation set 1/5 folds 
+    iecv_val_data        <- data_fit[iecv_val_indices, ]       ## Take from x_train 
+    iecv_val_labels      <- label_fit[iecv_val_indices]        ## Take from labels 
+    
+    iecv_fit_data      <- data_fit[-iecv_val_indices, ]        ## Train data = 4/5 folds
+    iecv_fit_labels    <- label_fit[-iecv_val_indices]         ## Train labels 4/5 
+    
+    iecv_model <- keras_model_sequential()                     ## Instantiate keras model 
+    for(b in 1:layers){                                        ## loop added to vary number of hidden layers
+      iecv_model %>% 
+        layer_dense(units = units, activation = 'relu', input_shape=c(24))                      
+    }
+    iecv_model %>% layer_dense(units = 1, activation = 'linear') %>% 
+      compile(
+        optimizer = optimizer_adam(lr=learnrate),
+        loss = rmse,          
+        metrics = "mse"      
+      )
+    ## Fit the model- batch size= 1024, prev. large at 8192 ##
+    iecv_model %>% fit(iecv_fit_data, iecv_fit_labels, epochs=epochs, 
+                     batch_size=8192, verbose=2, callbacks = callback, 
+                     validation_data = list(iecv_val_data, iecv_val_labels)) 
+    
+    ## Generate predictions on held-out fold ##
+    iecv_predictions <- predict(iecv_model, iecv_val_data)
+    
+    ## BO wants to find the maximum, but lower RMSE = better ##
+    ## -1 x RMSE: lower RMSE = higher value, so use this to score the config ##
+    negative_rmse <- -1*sqrt((mean((iecv_predictions-iecv_val_labels)^2)))
+
+    iecv_score <- c(iecv_score, negative_rmse)
+    
+    ## Clear out the model at the end of loop to avoid merging ##
+    rm(iecv_model) 
+  }
+  ## BO needs score to be returned to it ##
+  return(list(Score = mean(iecv_score)))
+}
+
+
+## Define hyperparameter search space - 'bounds' to search ##
+
+bounds <- list(
+  epochs = c(1L, 5L),      ## Number of times model gets fed the data
+  units = c(6L, 48L),       ## Number of nodes in each layer 
+  layers = c(1L, 5L),       ## Between 1 and 5 hidden layers
+  learnrate = c(0.001, 0.1) ## default for Adam is 0.001, start there and go up
+)
+
+##############
+## Run IECV ##
+##############
+
+start <- Sys.time() 
+
+iecv_predictions <- c() 
+
+for(d in seq(1:10)) {
+  
+  set.seed(1066)
+  
+  data_1    <- data_period1[ -which (data_period1$sha1 == levels(data_period1$sha1)[d]), ]
+  data_fit  <- as.matrix(data_1[, x_cols])
+  label_fit <- as.matrix(data_1[, y_cols])
+  
+  data_2    <- data_period2[ which (data_period2$sha1 == levels(data_period2$sha1)[d]), ]
+  data_val  <- as.matrix(data_2[, x_cols])
+  
+  bayesian_neural <- bayesOpt(
+    FUN = scorefunction, 
+    bounds = bounds, 
+    initPoints = 10, 
+    iters.n = 10, 
+    iters.k = 1, 
+    parallel = FALSE, 
+    plotProgress = FALSE, 
+    verbose = 2, 
+    errorHandling = "continue", 
+    acq = "ei"
+  )
+  
+  ## Summarise BO run ##
+  bayesian_neural$scoreSummary
+  plot(bayesian_neural) 
+  bestpars <- getBestPars(bayesian_neural)
+  bestpars 
+  
+  ## Extract optimal hyperparameters from this IECV iteration ##
+  best_epochs <- bestpars[1]
+  best_units <- bestpars[2]
+  best_layers <- toString(bestpars[3])
+  best_learnrate <- as.numeric(bestpars[4])
+  
+  ## Fit this 'final model' using optimal settings, then validate on held out 
+  ## region's data from period 2 ## 
+  bayes_model <- keras_model_sequential() 
+  for(e in 1:best_layers) {
+    bayes_model %>% 
+        layer_dense(units = best_units, activation = 'relu', input_shape=c(30))                    
+  }
+  bayes_model %>% layer_dense(units = 1, activation = 'linear') %>% 
+      compile(
+        optimizer = optimizer_adam(lr=best_learnrate), 
+        loss = rmse,          
+        metrics = "mse"      
+      )
+  
+  bayes_model %>% fit(data_fit, label_fit, epochs = best_epochs, 
+                      batch_size=4192, verbose = 2)
+  
+  predictions <- predict(bayes_model, data_val)
+  iecv_predictions[[d]] = predictions 
+  
+  rm(bayes_model)
+  
+}
+
+end <- Sys.time() 
+end-start 
+
+
+# Collate the predictions generated with each iteration of the validation loop #
+
+nnet_iecv_predictions <- c(iecv_predictions[[1]], iecv_predictions[[2]],
+                           iecv_predictions[[3]], iecv_predictions[[4]],
+                           iecv_predictions[[5]], iecv_predictions[[6]],
+                           iecv_predictions[[7]], iecv_predictions[[8]],
+                           iecv_predictions[[9]], iecv_predictions[[10]])
+
+summary(nnet_iecv_predictions) 
+
+patid <- as.data.frame(data_period2$patid)
+export_predictions <- cbind(patid, nnet_iecv_predictions)
+head(export_predictions) 
+
+setwd("//estimates/ML_IECV_predictions/")
+write.csv(export_predictions, "endpoint2_nnet_iecv_predictions_ethnicity.csv")
+
+rm(list = ls())
+
+#####################################################################################
+#####################################################################################
+
+
+
+## Now, we perform the performance assessment in Stata ## 
+
+
+##################################################################
+# Performance assessment after internal-external crossvalidation #
+##################################################################
+
+ 
+
+***************************************************************** 
+** Performance of NNet based on 'pooled predictions' and IECV  **  
+***************************************************************** 
+
+
+* Open saved csv file from R *  
+import delimited "\\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions.csv", asdouble  
+drop v1  
+
+* Destring the predictions, and rename variables for congeniality with Stata files*   
+rename nnet_iecv_predictions predictions  
+destring predictions, dpcomma replace 
+summ predictions, det 
+rename data_period2patid patid 
+bys patid: gen m = _n        
+ 
+
+* Save this as interim dataset *  
+save "\\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions_formatted.dta", replace 
+
+* We want to perform model evaluation in accordance with Rubin's rules with  
+* multiple imputed datasets. For this, Stata 'needs' an m=0 (i.e. complete case) 
+* copy, and then the separate imputations. We need to trick Stata into this 
+* First, keep first imputation, and say it is the complete case, m=0  
+keep if m==1  
+replace m=0  
+
+* Generate mi style missing indicator - say that predictions are missing, then  
+* later we can use Stata's mi machinery to handle the 5 predictions for each  
+* patid as a separate imputations' predition  
+gen i_predictions = 1  
+tab m  
+replace predictions = . if i_predictions==1  
+
+* Now that the predictions in m=0 are missing, append the dataset with the 5  
+* true values of the predictions, 1 for each pati in each imputation  
+append using  "\\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions_formatted.dta" 
+
+* Save interim data file  
+save  "\\qrvfile1\OX129\OX129\estimates\ML_IECV_predictions\endpoint2_xgboost_nnet_predictions_formatted.dta", replace  
+
+* Format as multiply imputed dataset - now, m=0 will have no predictions, whereas  
+* the m=1 to m=5 will have their respective predictions in  
+
+mi import flong, m(m) id(patid) imputed(predictions) 
+
+save  "\\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions_formatted.dta", replace 
+
+* Convert to wide style for the convenience of dataset size, and for merging later  
+mi convert wide  
+mi describe  
+
+
+* For the smoothed calibration plot, we want the average prediction, so that  
+* this can be plotted against the observed pseudovalues *  
+
+egen mean_prediction = rowmean(_1_predict - _5_predict)  
+
+
+* Save and clear *  
+save  "\\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions_formatted.dta", replace 
+clear  
+
+
+* Open up the key dataset - this contains psuedovalues, period1, period2, etc. * 
+use "\\data\final_datasets\Endpoint_2\OX129_endpoint2_competingrisk_IECV.dta", clear  
+
+* Merge in the formatted predictions from the IECV process  *  
+mi merge 1:1 patid using "\\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions_formatted.dta" 
+
+drop cll_pred   // from previous use of the core dataset for evaluating competing risks regression modelling 
+
+ 
+
+************************ 
+** Pooled predictions ** 
+************************ 
+
+summ mean_prediction, det  
+
+* Plot the smoothed calibration plot - save out *   
+
+running period2_pseudo mean_prediction, ci leg(off) nopts xscale(range(0 0.2)) yscale(range(0 0.2)) aspect(1)  // 
+title("Smoothed calibration plot - XGBoost", size(small)) xtitle("Predicted event probability", size(small))  // 
+ytitle("Observed event probability", size(small)) graphregion(color(white)) ylabel(0(.01)0.2) xlabel(0(.01)0.2) 
+
+graph save "\\graphs\ep2_competing\calibration_nnet_iecv.gph", replace 
+
+ 
+* Use cloglog transform of predictions *  
+* Model on the cloglog scale, as per: Survival Analysis Group, LUMC *  
+mi passive: gen cll_pred = log(-log(1-prediction)) 
+
+
+* Calibration of Neural Network - pooled predictions *  
+* Slope *  
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls  
+
+* CITL *  
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+
+* Discrimination - pooled predictions *  
+mi register regular ipcw  
+mi stset fu_end, origin(fu_start) failure(iecv_event==1) scale(365.25) exit(time fu_start+3652.5) 
+mi passive: gen hr = exp(prediction) 
+mi passive: gen invhr = 1/hr  
+drop censind  
+gen censind = 1 - _d if _st==1 
+mi estimate, dots cmdok: somersd _t invhr if (_st==1) [iweight=ipcw], cenind(censind) tdist transf(c) 
+
+ 
+**************************************************************** 
+** Pooled predictions: heterogeneity by ethnicity and age grp ** 
+**************************************************************** 
+
+* Discrimination in different ethnic groups *  
+forval x = 1(1)6 { 
+mi estimate, dots esampvaryok: somersd _t invhr if (_st==1 & ethnicity==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  }  
+
+* Calibration slope in different ethnic groups  *  
+forval x = 1(1)6 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethnicity==`x', link(cloglog) vce(robust) noconstant irls  
+} 
+
+* Calibration-in-the-large in different ethnic groups *  
+forval x = 1(1)6 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethnicity==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)   
+} 
+ 
+
+* Age group categories *  
+tab agegroup  
+ 
+* Discrimination in different age groups - Harrell's C*  
+forval x = 1(1)7 { 
+mi estimate, cmdok dots: somersd _t invhr if (_st==1 & period==2 & agegroup==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  } 
+  
+* Calibration slope in different age groups *  
+forval x = 1(1)7 {  
+mi estimate, dots: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) vce(robust) noconstant irls  
+} 
+
+* Calibration in the large in different age groups *  
+forval x = 1(1)7 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)   
+} 
+ 
+* Different age groups - pre-screen, screening age, post-screening age *  
+gen age_group3 = 1  
+replace age_group3 = 2 if age>=50  
+replace age_group3 = 3 if age>70  
+tab age_group3 if _mi_m==0  
+tab _d age_group3 if _mi_m==0  
+ 
+* Discrimination in age groups - Harrell's C*  
+forval x = 1(1)3 { 
+mi estimate, cmdok dots: somersd _t invhr if (_st==1 & period==2 & age_group3==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  } 
+
+ 
+* Calibration slope in age groups *  
+forval x = 1(1)3 {  
+mi estimate, dots: glm period2_pseudo cll_pred if age_group3==`x', link(cloglog) vce(robust) noconstant irls  
+} 
+
+* Calibration in the large in age groups *  
+forval x = 1(1)3 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if age_group3==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+} 
+
+ 
+************************************************ 
+** IECV predictions and performance estimates ** 
+************************************************ 
+ 
+************************************************** 
+**     Region-level heterogeneity and results   ** 
+************************************************** 
+
+cd "\\estimates\"  
+ 
+*************************** 
+* GT IECV for Harrell's C * 
+***************************
+ 
+capture postutil clear    
+tempname C_EP2regionnnet 
+postfile `C_EP2regionnnet' beta st_err val_size using C_EP2regionnnet.dta , replace  
+  
+  forval x = 1(1)10 { 
+  mi estimate, dots: somersd _t invhr if (_st==1 & sha1==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  local beta = r(table)[1,1] 
+  local st_err = r(table)[2,1] 
+  local val_size = e(N) 
+  post `C_EP2regionnnet' (`beta') (`st_err') (`val_size') 
+  } 
+ 
+  postclose `C_EP2regionnnet'  
+
+ 
+********************************* 
+* GT IECV for calibration slope * 
+*********************************
+ 
+capture postutil clear    
+tempname slope_EP2regionnnet 
+postfile `slope_EP2regionnnet' slope slope_se val_size using slope_EP2regionnnet.dta , replace  
+   
+  forval x = 1(1)10 { 
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) vce(robust) noconstant irls  
+  local slope = r(table)[1,1] 
+  local slope_se = r(table)[2,1] 
+  local val_size = e(N) 
+  post `slope_EP2regionnnet' (`slope') (`slope_se') (`val_size') 
+  } 
+
+  postclose `slope_EP2regionnnet'   
+   
+**************************************** 
+* GT IECV for calibration-in-the-large * 
+****************************************
+
+capture postutil clear    
+tempname citl_EP2regionnnet 
+postfile `citl_EP2regionnnet' citl citl_se val_size using citl_EP2regionnnet.dta , replace  
+   
+  forval x = 1(1)10 {  
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+  local citl = r(table)[1,1] 
+  local citl_se = r(table)[2,1] 
+  local val_size = e(N) 
+  post `citl_EP2regionnnet' (`citl') (`citl_se') (`val_size') 
+  } 
+  
+  postclose `citl_EP2regionnnet' 
+
+ clear  
+
+  
+***************** 
+* Meta-analyses * 
+***************** 
+
+** Random effects meta-analysis pooled performance metrics *  
+
+use "\\estimates\C_EP2regionnnet.dta", clear   
+input str50 region 
+"East Midlands (138/176,360)" 
+"East of England (143/227,079)" 
+"London (458/1,690,339)" 
+"North East (77/98,275)" 
+"North West (505/815,303)" 
+"South Central (307/625,953)" 
+"South East (292/551,737)" 
+"South West (341/578,496)" 
+"West Midlands (349/520,826)" 
+"Yorkshire & Humber (94/191,202)" 
+end 
+meta set beta st_err, studylab(region) 
+meta summarize, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0.5) 
+graph save "Graph" "\\graphs\ep2_competing\EP2_harrellsC_nnet.gph", replace  
+clear  
+
+ 
+use "\\estimates\slope_EP2regionnnet.dta" , clear  
+input str50 region 
+"East Midlands (138/176,360)" 
+"East of England (143/227,079)" 
+"London (458/1,690,339)" 
+"North East (77/98,275)" 
+"North West (505/815,303)" 
+"South Central (307/625,953)" 
+"South East (292/551,737)" 
+"South West (341/578,496)" 
+"West Midlands (349/520,826)" 
+"Yorkshire & Humber (94/191,202)" 
+end 
+meta set slope slope_se, studylab(region) 
+meta summarize, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(1) 
+graph save "Graph" "\\graphs\ep2_competing\EP2_slope_nnet.gph", replace  
+clear 
+
+ 
+use "\\estimates\citl_EP2regionnnet.dta" , clear  
+input str50 region 
+"East Midlands (138/176,360)" 
+"East of England (143/227,079)" 
+"London (458/1,690,339)" 
+"North East (77/98,275)" 
+"North West (505/815,303)" 
+"South Central (307/625,953)" 
+"South East (292/551,737)" 
+"South West (341/578,496)" 
+"West Midlands (349/520,826)" 
+"Yorkshire & Humber (94/191,202)" 
+end 
+meta set citl citl_se, studylab(region) 
+meta summarize, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0) 
+graph save "Graph" "\\raphs\ep2_competing\EP2_citl_nnet.gph", replace  
+clear 
+ 
+
+
+******************************************************************************** 
+********************************** END *****************************************
+******************************************************************************** 
