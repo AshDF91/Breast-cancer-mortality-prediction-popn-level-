@@ -3,7 +3,7 @@
 *        mortality at the population level  
 * Project: OX129  
 * Input: "\\data\final_datasets\OX129_endpoint2.dta" 
-* Output:  one multiply imouted dataset - 
+* Output: multiply imputed dataset - "OX129_endpoint2_imputed_new.dta"
 * Author: Ash Clift 
 * Date: 27th January 2022  
 * Notes: Multiply impute missing values for BMI, Townsend, alcohol intake, smoking, 
