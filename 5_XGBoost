@@ -1,0 +1,870 @@
+################################################################################
+#  Title: XGBoost prediction model code. Endpoint 2 - pseudovalues
+#  Project: OX129 - breast cancer risk prediction modelling
+#  Author: Ash Clift, 1st November 2021
+#  Input files: "OX129_endpoint2_stacked5_pseudovalues.dta"
+#       Stacked imputations from Endpoint2 imputed dataset  
+#  Outputs: XGBoost model for EP2; 
+#  Version: 2 - 1st March 2022 
+################################################################################
+
+
+## Load in packages needed ##
+library(survival)
+library(readr)
+library(stringr) 
+library(haven)
+library(ParBayesianOptimization)
+library(xgboost) 
+
+## Load in data ##
+#setwd("//data/")
+data <- read_dta("//data/final_datasets/ML/OX129_endpoint2_stacked5_pseudovalues.dta")
+str(data)
+
+## Categorical variables were converted into dummies where needed in Stata ##
+## Here, declare as 'numeric', so can be coalesced into xgb matrix ##
+data$vasculitis              <- as.numeric(data$vasculitis)
+data$ssri                    <- as.numeric(data$ssri)
+data$ihd                     <- as.numeric(data$ihd)
+data$fibrocystic             <- as.numeric(data$fibrocystic) 
+data$fh_breastca             <- as.numeric(data$fh_breastca) 
+data$smoking_category1       <- as.numeric(data$smoking_category1)
+data$smoking_category2       <- as.numeric(data$smoking_category2)
+data$smoking_category3       <- as.numeric(data$smoking_category3)
+data$smoking_category4       <- as.numeric(data$smoking_category4)
+data$smoking_category5       <- as.numeric(data$smoking_category5)
+data$past_oestrogen_use1     <- as.numeric(data$past_oestrogen_use1)
+data$past_oestrogen_use2     <- as.numeric(data$past_oestrogen_use2)
+data$past_oestrogen_use3     <- as.numeric(data$past_oestrogen_use3)
+data$past_oestrogen_use4     <- as.numeric(data$past_oestrogen_use4)
+data$past_oestrogen_use5     <- as.numeric(data$past_oestrogen_use5)
+data$past_oestrogen_use6     <- as.numeric(data$past_oestrogen_use6)
+data$past_combinedhrt_use1   <- as.numeric(data$past_combinedhrt_use1)
+data$past_combinedhrt_use2   <- as.numeric(data$past_combinedhrt_use2)
+data$past_combinedhrt_use3   <- as.numeric(data$past_combinedhrt_use3)
+data$past_combinedhrt_use4   <- as.numeric(data$past_combinedhrt_use4)
+data$past_combinedhrt_use5   <- as.numeric(data$past_combinedhrt_use5)
+data$past_combinedhrt_use6   <- as.numeric(data$past_combinedhrt_use6)
+
+## Set up the predictors and outcome ##
+## Set up X columns (predictors), and Y column (time to event) for XGBoost algorithm to handle ##
+x_cols <- c('age', 'bmi', 'fibrocystic', 'smoking_category1', 'smoking_category2', 
+            'smoking_category3', 'smoking_category4', 'smoking_category5',
+            'past_oestrogen_use1', 'past_oestrogen_use2', 'past_oestrogen_use3', 
+            'past_oestrogen_use4', 'past_oestrogen_use5', 'past_oestrogen_use6', 
+            'past_combinedhrt_use1', 'past_combinedhrt_use2', 'past_combinedhrt_use3', 
+            'past_combinedhrt_use4', 'past_combinedhrt_use5', 'past_combinedhrt_use6', 
+            'fh_breastca', 'ihd', 'vasculitis', 'ssri')
+
+y_cols <- c('pseudo_crr')
+
+
+## Change dataset to a matrix  ##
+## x_train = predictor parameters ##
+x_train <- as.matrix(data[, x_cols])
+
+## Labels = the target for the XGBoost model - the pseudovalues ##
+label_train <- as.matrix(data[, y_cols])
+
+# Remove original data file for saving memory space #
+# Only the x_train, label_train and weights matrices are needed # 
+# First, keep the patids so we can save the individual predictions # 
+patid <- as.data.frame(data$patid)
+rm(data) 
+
+
+## Fit full model to entire available dataset - this is the model 
+## that will be evaluated using IECV ## 
+## We will run cross-validation for hyperparameter tuning ##
+
+set.seed(1066)
+
+## Bayesian optimsation package requires you to first: specify the function 
+## one seeks to optimimse. Here, it is to find the optimal hyperparameters for the 
+## model, so that the root mean squared error is minimised ##
+
+## Here, we set up this 'scoring function' so that we find the best values of max_depth, 
+## eta, and number of boosting rounds, etc.  #
+## In order to assess the performance of each combination, 5-fold cross-validation is used.
+## 5-fold CV used to estimates the 'average' performance, so the smallest value of the rmse desired
+## if found from the evaluation log, and these values used ##
+
+## Due to issues with xgboost inbuilt cross-validation function when using this very large
+## dataset with GPU, we code this by hand ##
+
+
+scorefunction <- function(max_depth, eta, subsample, number, alpha, gamma, 
+                          lambda, colsampletree, colsamplelevel) {
+  
+  set.seed(1066)
+  
+  k <- 5                                                          ## 5-fold cross-validation 
+  indices <- sample(1:nrow(x_train))                              ## Used to randomly assign to folds 
+  folds <- cut(1:length(indices), breaks = k, labels = FALSE)     ## folds 
+  
+  cv_score <- c()                                                 ## empty list to store 'scores' over each CV iteration 
+  
+  for (a in 1:k) {                                                ## Nested loop to perform CV
+    
+    cv_val_indices     <- which(folds==a)                         ## validation set 1/5 folds 
+    cv_val_data        <- x_train[cv_val_indices, ]               ## Take from x_train 
+    cv_val_labels      <- label_train[cv_val_indices]             ## Take from labels 
+    
+    cv_train_data      <- x_train[-cv_val_indices, ]              ## Train data = 4/5 folds
+    cv_train_labels    <- label_train[-cv_val_indices]            ## Train labels 4/5 
+    
+    cv_train <- xgb.DMatrix(data=cv_train_data, label=cv_train_labels) 
+    cv_val   <- xgb.DMatrix(data=cv_val_data, label=cv_val_labels)
+  
+    pars <- list(
+    tree_method = "gpu_hist", 
+    sampling_method = "gradient_based", 
+    objective = "reg:squarederror", 
+    eval_metric = "rmse", 
+    maximize = FALSE, 
+    max_depth = max_depth, 
+    eta = eta, 
+    subsample = subsample, 
+    alpha = alpha, 
+    gamma = gamma, 
+    lambda = lambda, 
+    colsample_bytree = colsampletree, 
+    colsample_bylevel = colsamplelevel
+  )
+  
+    xgboost_cv <- xgb.train(data = cv_train, param = pars, 
+                            nrounds = number, verbose = 2)         ##Fit model to 4/5 data
+    
+    cv_predictions <- predict(xgboost_cv, cv_val)                  ## Estimate predictions on held-out fold
+    
+    # Estimate performance - RMSE of predicted vs. observed pseudovalues in validation fold
+    negative_rmse <- -1*sqrt((mean((cv_predictions-cv_val_labels)^2)))
+    
+    # Pass these RMSE results to the cv_score, so they can be handed to the BO package 
+    cv_score <- c(cv_score, negative_rmse)
+    
+    ## Clear out the model at the end of loop ##
+    rm(xgboost_cv)  
+  }
+  ## BO needs score to be returned to it ##
+  return(list(Score = mean(cv_score)))
+}
+
+## Once scoring function set up, need to define the hyperparameter search space #
+
+bounds <- list(
+  max_depth = c(1L, 6L), 
+  eta = c(0.0001, 0.1), 
+  subsample = c(0.1, 0.8),                     ## prev. tried upper limit of 0.3
+  number = c(1L, 500L), 
+  alpha = c(0L, 20L), 
+  gamma = c(0L, 20L), 
+  lambda = c(0L, 20L), 
+  colsampletree = c(0.1, 0.8), 
+  colsamplelevel = c(0.1, 0.8)
+)
+
+start <- Sys.time() 
+
+bayesian_boost <- bayesOpt(
+  FUN = scorefunction, 
+  bounds = bounds, 
+  initPoints = 25, 
+  iters.n = 25,
+  iters.k = 1, 
+  parallel = FALSE, 
+  verbose = 2, 
+  acq = "ei", 
+  plotProgress = FALSE
+)
+
+end <- Sys.time() 
+end-start 
+
+plot(bayesian_boost) 
+
+## Evaluate the output of the Bayesian Optimisation process ## 
+# Extract the best hyperparameters combination found #
+
+bayesian_boost$scoreSummary 
+bestpars <- getBestPars(bayesian_boost)
+bestpars 
+
+# Store these best values to plug into a model fitted to the full development data #
+opt_maxdepth        = bestpars[1]
+opt_eta             = bestpars[2]
+opt_subsamp         = bestpars[3]
+opt_number          = bestpars[4]
+opt_alpha           = bestpars[5]
+opt_gamma           = bestpars[6]
+opt_lambda          = bestpars[7]
+opt_colsampletree   = bestpars[8]
+opt_colsamplelevel  = bestpars[9] 
+
+
+# set these as the parameters for the model # 
+
+parameters <- list(tree_method = "gpu_hist", 
+                   sampling_method = "gradient_based", 
+                   objective = "reg:squarederror", 
+                   eval_metric = "rmse", 
+                   maximize = FALSE, 
+                   max_depth = opt_maxdepth, 
+                   eta = opt_eta, 
+                   subsample = opt_subsamp, 
+                   alpha = opt_alpha, 
+                   gamma = opt_gamma, 
+                   lambda = opt_lambda, 
+                   colsample_bytree = opt_colsampletree, 
+                   colsample_bylevel = opt_colsamplelevel
+                   )
+
+dtrain <- xgb.DMatrix(data=x_train, label=label_train) 
+
+xgboost_model_endpoint2 <- xgb.train(data = dtrain, param = parameters, 
+                             nrounds = opt_number$number, verbose =2)
+
+setwd("//models/Endpoint_2/")
+xgb.save(xgboost_model_endpoint2, fname = "xgboost_model_endpoint2")
+
+full_model_predictions <- predict(xgboost_model_endpoint2, dtrain)
+summary(full_model_predictions) 
+
+
+importance.matrix <- xgb.importance(colnames(x_train), model=xgboost_model_endpoint2)
+xgb.plot.importance(importance.matrix, rel_to_first=TRUE, xlab="Relative predictor importance", col="darkblue", cex=0.3)
+
+importance.matrix <- xgb.importance(colnames(x_train), model=xgboost_model_endpoint2)
+xgb.plot.importance(importance.matrix, rel_to_first=TRUE, xlab="Relative predictor importance", col="darkblue", cex=0.8, top_n=10)
+
+table <- importance.matrix 
+table 
+
+# Clear out the environment before moving to next step, or have separate Markdown files # 
+rm(list=ls())
+
+#################################################################################################
+#################################################################################################
+
+
+##############################################################
+## IECV to evaluate performance of this funal XGBoost model ##
+##############################################################
+
+
+# Load packages # 
+library(survival)
+library(xgboost)
+library(readr)
+library(stringr)
+library(caret)
+library(haven)
+library(ParBayesianOptimization)
+
+
+# Check and set working directory for saving files ##
+getwd() 
+setwd("//data/final_datasets/ML/")
+
+## Load in data ##
+data_period1 <- read_dta("OX129_endpoint2_stacked5_period1_pseudovalues.dta")
+str(data_period1)
+
+## Categorical variables were converted into dummies where needed in Stata ##
+data_period1$vasculitis              <- as.numeric(data_period1$vasculitis)
+data_period1$ssri                    <- as.numeric(data_period1$ssri)
+data_period1$ihd                     <- as.numeric(data_period1$ihd)
+data_period1$fibrocystic             <- as.numeric(data_period1$fibrocystic) 
+data_period1$fh_breastca             <- as.numeric(data_period1$fh_breastca) 
+data_period1$smoking_category1       <- as.numeric(data_period1$smoking_category1)
+data_period1$smoking_category2       <- as.numeric(data_period1$smoking_category2)
+data_period1$smoking_category3       <- as.numeric(data_period1$smoking_category3)
+data_period1$smoking_category4       <- as.numeric(data_period1$smoking_category4)
+data_period1$smoking_category5       <- as.numeric(data_period1$smoking_category5)
+data_period1$ethnic_group1           <- as.numeric(data_period1$ethnic_group1)
+data_period1$ethnic_group2           <- as.numeric(data_period1$ethnic_group2)
+data_period1$ethnic_group3           <- as.numeric(data_period1$ethnic_group3)
+data_period1$ethnic_group4           <- as.numeric(data_period1$ethnic_group4)
+data_period1$ethnic_group5           <- as.numeric(data_period1$ethnic_group5)
+data_period1$ethnic_group6           <- as.numeric(data_period1$ethnic_group6)
+data_period1$past_oestrogen_use1     <- as.numeric(data_period1$past_oestrogen_use1)
+data_period1$past_oestrogen_use2     <- as.numeric(data_period1$past_oestrogen_use2)
+data_period1$past_oestrogen_use3     <- as.numeric(data_period1$past_oestrogen_use3)
+data_period1$past_oestrogen_use4     <- as.numeric(data_period1$past_oestrogen_use4)
+data_period1$past_oestrogen_use5     <- as.numeric(data_period1$past_oestrogen_use5)
+data_period1$past_oestrogen_use6     <- as.numeric(data_period1$past_oestrogen_use6)
+data_period1$past_combinedhrt_use1   <- as.numeric(data_period1$past_combinedhrt_use1)
+data_period1$past_combinedhrt_use2   <- as.numeric(data_period1$past_combinedhrt_use2)
+data_period1$past_combinedhrt_use3   <- as.numeric(data_period1$past_combinedhrt_use3)
+data_period1$past_combinedhrt_use4   <- as.numeric(data_period1$past_combinedhrt_use4)
+data_period1$past_combinedhrt_use5   <- as.numeric(data_period1$past_combinedhrt_use5)
+data_period1$past_combinedhrt_use6   <- as.numeric(data_period1$past_combinedhrt_use6)
+data_period1$sha1                    <- as.factor(data_period1$sha1)
+
+## Set up the predictors and outcome ##
+## Set up X columns (predictors), and Y column (time to event) for XGBoost algorithm to handle ##
+x_cols <- c('age', 'bmi', 'fibrocystic', 'smoking_category1', 'smoking_category2', 
+            'smoking_category3', 'smoking_category4', 'smoking_category5',
+            'past_oestrogen_use1', 'past_oestrogen_use2', 'past_oestrogen_use3', 
+            'past_oestrogen_use4', 'past_oestrogen_use5', 'past_oestrogen_use6', 
+            'past_combinedhrt_use1', 'past_combinedhrt_use2', 'past_combinedhrt_use3', 
+            'past_combinedhrt_use4', 'past_combinedhrt_use5', 'past_combinedhrt_use6', 
+            'fh_breastca', 'ihd', 'vasculitis', 'ssri', 'ethnic_group1', 'ethnic_group2', 
+            'ethnic_group3', 'ethnic_group4', 'ethnic_group5', 'ethnic_group6')
+y_cols <- c('period1_pseudo')
+
+
+
+## Period 2 data - the iteratively held-out test sets 
+
+## Load in data ##
+setwd("//data/final_datasets/ML/")
+data_period2 <- read_dta("OX129_endpoint2_stacked5_period2_pseudovalues.dta")
+str(data_period2)
+
+## Categorical variables were converted into dummies where needed in Stata ##
+data_period2$vasculitis              <- as.numeric(data_period2$vasculitis)
+data_period2$ssri                    <- as.numeric(data_period2$ssri)
+data_period2$ihd                     <- as.numeric(data_period2$ihd)
+data_period2$fibrocystic             <- as.numeric(data_period2$fibrocystic) 
+data_period2$fh_breastca             <- as.numeric(data_period2$fh_breastca) 
+data_period2$smoking_category1       <- as.numeric(data_period2$smoking_category1)
+data_period2$smoking_category2       <- as.numeric(data_period2$smoking_category2)
+data_period2$smoking_category3       <- as.numeric(data_period2$smoking_category3)
+data_period2$smoking_category4       <- as.numeric(data_period2$smoking_category4)
+data_period2$smoking_category5       <- as.numeric(data_period2$smoking_category5)
+data_period2$ethnic_group1           <- as.numeric(data_period2$ethnic_group1)
+data_period2$ethnic_group2           <- as.numeric(data_period2$ethnic_group2)
+data_period2$ethnic_group3           <- as.numeric(data_period2$ethnic_group3)
+data_period2$ethnic_group4           <- as.numeric(data_period2$ethnic_group4)
+data_period2$ethnic_group5           <- as.numeric(data_period2$ethnic_group5)
+data_period2$ethnic_group6           <- as.numeric(data_period2$ethnic_group6)
+data_period2$past_oestrogen_use1     <- as.numeric(data_period2$past_oestrogen_use1)
+data_period2$past_oestrogen_use2     <- as.numeric(data_period2$past_oestrogen_use2)
+data_period2$past_oestrogen_use3     <- as.numeric(data_period2$past_oestrogen_use3)
+data_period2$past_oestrogen_use4     <- as.numeric(data_period2$past_oestrogen_use4)
+data_period2$past_oestrogen_use5     <- as.numeric(data_period2$past_oestrogen_use5)
+data_period2$past_oestrogen_use6     <- as.numeric(data_period2$past_oestrogen_use6)
+data_period2$past_combinedhrt_use1   <- as.numeric(data_period2$past_combinedhrt_use1)
+data_period2$past_combinedhrt_use2   <- as.numeric(data_period2$past_combinedhrt_use2)
+data_period2$past_combinedhrt_use3   <- as.numeric(data_period2$past_combinedhrt_use3)
+data_period2$past_combinedhrt_use4   <- as.numeric(data_period2$past_combinedhrt_use4)
+data_period2$past_combinedhrt_use5   <- as.numeric(data_period2$past_combinedhrt_use5)
+data_period2$past_combinedhrt_use6   <- as.numeric(data_period2$past_combinedhrt_use6)
+data_period2$sha1                    <- as.factor(data_period2$sha1)
+z_cols <- c('period2_pseudo')
+
+
+
+## Set up Bayesian Optimisation function for cross-validation 
+
+# 10 regions, so set up loop to go over each of them #
+# Development data = period 1, region 'all except i', validation data = period 2, 
+# region i.  Set up empty list for storing individual predictions # 
+
+# Bounds for the search space for BO # 
+bounds <- list(
+  max_depth = c(1L, 6L), 
+  eta = c(0.0001, 0.3), 
+  subsample = c(0.1, 0.8), 
+  number = c(1L, 500L), 
+  alpha = c(0L, 20L), 
+  gamma = c(0L, 20L), 
+  lambda = c(0L, 20L), 
+  colsampletree = c(0.1, 0.8), 
+  colsamplelevel = c(0.1, 0.8)
+)
+
+iecv_predictions = list()
+
+start <- Sys.time() 
+
+for(a in seq(1:10)) {     ## for each of the 10 regions:  
+  
+set.seed(1066)            ## fitting and tuning data is the Period 1 data (minus one held out region)
+                          ## validation data is the held out region, but the data collected therefrom in Period 2
+                          
+  data_dev = data_period1[ -which (data_period1$sha1 == levels(data_period1$sha1)[a]), ]
+  data_val = data_period2[ which (data_period2$sha1 == levels(data_period2$sha1)[a]), ]
+  
+  x_dev <- as.matrix(data_dev[, x_cols])
+  label_dev <- as.matrix(data_dev[, y_cols])
+  x_val <- as.matrix(data_val[, x_cols])
+  label_val <- as.matrix(data_val[, z_cols])
+
+  ddev <- xgb.DMatrix(data=x_dev, label=label_dev)
+  dval <- xgb.DMatrix(data=x_val, label=label_val)
+  
+ 
+  scorefunction <- function(max_depth, eta, subsample, number, alpha, gamma, 
+                          lambda, colsampletree, colsamplelevel) {
+    
+    pars <- list(
+    tree_method = "gpu_hist", 
+    sampling_method = "gradient_based", 
+    objective = "reg:squarederror", 
+    eval_metric = "rmse", 
+    maximize = FALSE, 
+    max_depth = max_depth, 
+    eta = eta, 
+    subsample = subsample, 
+    alpha = alpha, 
+    gamma = gamma, 
+    lambda = lambda, 
+    colsample_bytree = colsampletree, 
+    colsample_bylevel = colsamplelevel
+  )
+    
+    xgbcv <- xgb.cv(
+      params = pars, 
+      data = ddev, 
+      nround = number, 
+      nfold = 5, 
+      early_stopping_rounds = 10, 
+      maximize = FALSE, 
+      verbose = 1
+    )
+    
+    result <- min(xgbcv$evaluation_log$test_rmse_mean)
+    converted_result <- -1*result  
+    
+    return(list(Score = converted_result)
+    )
+    
+  }
+  ## Finally, set up the Bayesian optimisation, and run it with the above functions/details ##
+  set.seed(1066) 
+  
+  bayesian_boost <- bayesOpt(
+  FUN = scorefunction, 
+  bounds = bounds, 
+  initPoints = 25, 
+  iters.n = 25,
+  iters.k = 1, 
+  parallel = FALSE, 
+  verbose = 1, 
+  acq = "ei", 
+  plotProgress = FALSE, 
+  errorHandling="continue"
+)
+  
+  ## Evaluate the output of the Bayesian Optimisation process ## 
+  # Extract the best hyperparameters combination found #
+  bayesian_boost$scoreSummary 
+  bestpars <- getBestPars(bayesian_boost)
+  bestpars 
+  
+  # Plot the outcomes - look for the utility # 
+  plot(bayesian_boost)
+  
+  # Store these best values to plug into a model fitted to the development data for this iteration #
+  
+  opt_maxdepth        = bestpars[1]
+  opt_eta             = bestpars[2]
+  opt_subsamp         = bestpars[3]
+  opt_number          = bestpars[4]
+  opt_alpha           = bestpars[5]
+  opt_gamma           = bestpars[6]
+  opt_lambda          = bestpars[7]
+  opt_colsampletree   = bestpars[8]
+  opt_colsamplelevel  = bestpars[9] 
+  
+  # set these as the parameters for the model # 
+  
+  parameters <- list(tree_method = "gpu_hist", 
+                   sampling_method = "gradient_based", 
+                   objective = "reg:squarederror", 
+                   eval_metric = "rmse", 
+                   maximize = FALSE, 
+                   max_depth = opt_maxdepth, 
+                   eta = opt_eta, 
+                   subsample = opt_subsamp, 
+                   alpha = opt_alpha, 
+                   gamma = opt_gamma, 
+                   lambda = opt_lambda, 
+                   colsample_bytree = opt_colsampletree, 
+                   colsample_bylevel = opt_colsamplelevel
+                   )
+  
+  xgboost_iecv_loop <- xgb.train(data = ddev, param = parameters, 
+                                       nrounds = opt_number$number, verbose=1)
+  
+  
+  predictions.test <- predict(xgboost_iecv_loop, dval)
+  iecv_predictions[[a]] = predictions.test  
+}
+
+end <-Sys.time() 
+end-start
+
+# Collate together the predictions made on the Period 2 data for regions 1 to 10 # 
+
+xgboost_iecv_predictions <- c(iecv_predictions[[1]], iecv_predictions[[2]], iecv_predictions[[3]],
+                              iecv_predictions[[4]], iecv_predictions[[5]], iecv_predictions[[6]],
+                              iecv_predictions[[7]], iecv_predictions[[8]], iecv_predictions[[9]],
+                              iecv_predictions[[10]])
+
+summary(xgboost_iecv_predictions) 
+str(xgboost_iecv_predictions) 
+
+patid <- as.data.frame(data_period2$patid)
+export_predictions <- cbind(patid, xgboost_iecv_predictions)
+head(export_predictions)
+
+setwd("//estimates/ML_IECV_predictions/")
+write.csv(export_predictions, file="endpoint2_xgboost_iecv_predictions.csv")
+
+# Clear out the environment before moving to next step, or have separate Markdown files # 
+rm(list=ls())
+
+###################################################################################################
+###################################################################################################
+
+
+* Move to Stata - same packages.commands used to evaluate all models, and same graphics packages..." * 
+
+ 
+
+********************************************************************* 
+** Performance of XGBoost based on 'pooled predictions' and IECV  **  
+********************************************************************* 
+
+* Open saved csv file from R *  
+import delimited "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions.csv", asdouble  
+drop v1                                                   // dud variable - just an observation number
+
+* Destring the predictions, and rename variables for congeniality with Stata files*   
+rename xgboost_iecv_predictions predictions  
+destring predictions, dpcomma replace 
+summ predictions, det 
+rename data_period2patid patid 
+bys patid: gen m = _n  
+drop if m>5         // just a QC, not needed, but like to keep track in case something went weird in the R modelling loops 
+
+ 
+
+* Clip the predictions to be between 0 and 1 - they are 'probabilities' *  
+* Due to nature of pseudo-observations, they are not constrained to be between 0 and 1 * 
+count if predictions<0 
+count if predictions>1 
+replace predictions = 0.0000001 if predictions<0      // Make very very small, but positive. Cloglog transforms don't like zeros
+replace predictions = 0.9999999 if predictions>1      // Make very close to 1. Cloglog transforms don't like ones 
+summ predictions, det                                 // Also, patients cannot be zero risk or 100% risk... 
+
+
+* Save this as interim dataset *  
+save "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta", replace 
+
+
+* We want to perform model evaluation in accordance with Rubin's rules with  
+* multiple imputed datasets. For this, Stata 'needs' an m=0 (i.e. complete case) 
+* copy, and then the separate imputations. We need to trick Stata into this.
+
+* First, keep first imputation, and say it is the complete case, m=0  
+
+keep if m==1  
+replace m=0  
+
+* Generate mi style missing indicator - say that predictions are missing, then  
+* later we can use Stata's mi machinery to handle the 5 predictions for each  
+* patid, i.e. as a separate imputations' predition  
+
+gen i_predictions = 1  
+tab m  
+replace predictions = . if i_predictions==1  
+
+* Now that the predictions in m=0 are missing, append the dataset with the 5  
+* true values of the predictions, 1 for each patid in each imputation  
+
+append using  "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta" 
+
+* Save interim data file  
+
+save "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta", replace  
+
+* Format as multiply imputed dataset - now, m=0 will have no predictions, whereas  
+* the m=1 to m=5 will have their respective predictions in there  
+
+mi import flong, m(m) id(patid) imputed(predictions) 
+
+save  "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta", replace 
+
+* Convert to wide style for the convenience of dataset size, and for merging later  
+mi convert wide  
+mi describe  
+
+ 
+* For the smoothed calibration plot, we want the average prediction obtained (of the 5), so that  
+* this can be plotted against the observed pseudovalues *  
+
+egen mean_prediction = rowmean(_1_predict - _5_predict)  
+
+* Save and clear *  
+
+save  "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta", replace 
+clear  
+
+* Open up the key dataset - this contains pseudovalues, period1, period2, etc. * 
+use "\\data\final_datasets\Endpoint_2\OX129_endpoint2_competingrisk_IECV.dta", clear  
+ 
+* Slimd down dataset, then merge in the formatted predictions from the IECV process for XGBoost * 
+drop status6_breastcancer outcomedate6_breastcancer alcohol_cat6 smoke_cat baseline_bmi ckd pcos htn ihd lungca  //
+bloodca thyroidca cirrhosis lupus type1dm type2dm fh_gynaeca past_combinedhrt recent_combinedhrt past_oestrogen recent_oestrogen  // 
+town_int ocp ssri maoi tca cablocker acei vasculitis endometriosis psychosis fibrocystic fh_breastca hysterectomy thiazide betablocker // 
+raa previous_biopsy previous_gynae_cancer age_xb bmi_xb town_xb Ibase__1 Itown__1 basechazard 
+
+mi merge 1:1 patid using "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta" 
+
+* Drop potentially interfering variables generated during evaluation of regression models * 
+drop cll_pred  
+
+
+************************ 
+** Pooled predictions ** 
+************************ 
+
+summ mean_prediction, det  
+ 
+* Use cloglog transform of predictions *  
+* Model on the cloglog scale, as per: Survival Analysis Group, LUMC *  
+mi passive: gen cll_pred = log(-log(1-prediction)) 
+
+* Calibration of XGBoost - pooled predictions *  
+* Slope *  
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls  
+
+* CITL *  
+mi estimate, dots: glm period2_pseudo cll_pred, link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+  
+* Discrimination - pooled predictions *  
+mi register regular ipcw                   // every individual has their IPC weight 
+mi stset fu_end, origin(fu_start) failure(iecv_event==1) scale(365.25) exit(time fu_start+3652.5) 
+mi passive: gen hr = exp(prediction) 
+mi passive: gen invhr = 1/hr  
+drop censind  
+gen censind = 1 - _d if _st==1 
+mi estimate, dots cmdok: somersd _t invhr if (_st==1) [iweight=ipcw], cenind(censind) tdist transf(c) 
+
+* Slim down data by keeping only those that have IECV-obtained predictions, helps it all run quicker * 
+keep if period==2  
+
+
+*************************************************
+* Plot the smoothed calibration plot - save out *   
+*************************************************
+
+running period2_pseudo mean_prediction, ci leg(off) nopts xscale(range(0 0.2)) yscale(range(0 0.2)) aspect(1)  // 
+title("Smoothed calibration plot - XGBoost", size(small)) xtitle("Predicted event probability", size(small))  // 
+ytitle("Observed event probability", size(small)) graphregion(color(white)) ylabel(0(.01)0.2) xlabel(0(.01)0.2) 
+
+graph save "\\graphs\ep2_competing\calibration_xgboost_iecv.gph", replace 
+
+ 
+**************************************************************** 
+** Pooled predictions: heterogeneity by ethnicity and age grp ** 
+**************************************************************** 
+
+* Discrimination in different ethnic groups *  
+forval x = 1(1)6 { 
+mi estimate, dots esampvaryok: somersd _t invhr if (_st==1 & ethnicity==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  }  
+
+* Calibration slope in different ethnic groups  *  
+forval x = 1(1)6 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethnicity==`x', link(cloglog) vce(robust) noconstant irls  
+} 
+ 
+* Calibration-in-the-large in different ethnic groups *  
+forval x = 1(1)6 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if ethnicity==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)   
+} 
+
+* Age group categories - previously made when running the competing risks regression evaluations *  
+tab agegroup  
+
+* Discrimination in different age groups - Harrell's C*  
+forval x = 1(1)7 { 
+mi estimate, cmdok dots: somersd _t invhr if (_st==1 & period==2 & agegroup==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  }   
+
+* Calibration slope in different age groups *  
+forval x = 1(1)7 {  
+mi estimate, dots: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) vce(robust) noconstant irls  
+} 
+
+* Calibration in the large in different age groups *  
+forval x = 1(1)7 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if agegroup==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)   
+} 
+
+* Different age groups - pre-screen, screening age, post-screening age *  
+drop age_group3  
+gen age_group3 = 1  
+replace age_group3 = 2 if age>=50  
+replace age_group3 = 3 if age>70  
+tab age_group3 if _mi_m==0  
+tab _d age_group3 if _mi_m==0  
+ 
+ 
+* Discrimination in age groups - Harrell's C*  
+forval x = 1(1)3 { 
+mi estimate, cmdok dots: somersd _t invhr if (_st==1 & period==2 & age_group3==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  } 
+
+
+* Calibration slope in age groups *  
+forval x = 1(1)3 {  
+mi estimate, dots: glm period2_pseudo cll_pred if age_group3==`x', link(cloglog) vce(robust) noconstant irls  
+} 
+
+
+* Calibration in the large in age groups *  
+forval x = 1(1)3 {  
+mi estimate, dots esampvaryok: glm period2_pseudo cll_pred if age_group3==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+} 
+ 
+ 
+************************************************ 
+** IECV predictions and performance estimates ** 
+************************************************ 
+
+*************************************************** 
+**     Region-level heterogeneity and results   ** 
+************************************************** 
+
+cd "\\estimates\"  
+
+*************************** 
+* GT IECV for Harrell's C * 
+***************************
+ 
+capture postutil clear    
+tempname C_EP2regionxgboost 
+postfile `C_EP2regionxgboost' beta st_err val_size using C_EP2regionxgboost.dta , replace  
+  
+  forval x = 1(1)10 { 
+  mi estimate, dots: somersd _t invhr if (_st==1 & sha1==`x') [iweight=ipcw], cenind(censind) tdist transf(c) 
+  local beta = r(table)[1,1] 
+  local st_err = r(table)[2,1] 
+  local val_size = e(N) 
+  post `C_EP2regionxgboost' (`beta') (`st_err') (`val_size') 
+  } 
+  
+  postclose `C_EP2regionxgboost'  
+   
+
+********************************* 
+* GT IECV for calibration slope * 
+*********************************
+ 
+capture postutil clear    
+tempname slope_EP2regionxgboost 
+postfile `slope_EP2regionxgboost' slope slope_se val_size using slope_EP2regionxgboost.dta , replace  
+   
+  forval x = 1(1)10 { 
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) vce(robust) noconstant irls  
+  local slope = r(table)[1,1] 
+  local slope_se = r(table)[2,1] 
+  local val_size = e(N) 
+  post `slope_EP2regionxgboost' (`slope') (`slope_se') (`val_size') 
+  } 
+ 
+ postclose `slope_EP2regionxgboost'   
+   
+
+**************************************** 
+* GT IECV for calibration-in-the-large * 
+****************************************
+ 
+capture postutil clear    
+tempname citl_EP2regionxgboost 
+postfile `citl_EP2regionxgboost' citl citl_se val_size using citl_EP2regionxgboost.dta , replace  
+  
+  forval x = 1(1)10 {  
+  mi estimate, dots: glm period2_pseudo cll_pred if sha1==`x', link(cloglog) vce(robust) noconstant irls offset(cll_pred)  
+  local citl = r(table)[1,1] 
+  local citl_se = r(table)[2,1] 
+  local val_size = e(N) 
+  post `citl_EP2regionxgboost' (`citl') (`citl_se') (`val_size') 
+  } 
+
+  postclose `citl_EP2regionxgboost' 
+
+
+ clear  
+
+   
+***************** 
+* Meta-analyses * 
+***************** 
+
+** Random effects meta-analysis pooled performance metrics *  
+
+use "\\estimates\C_EP2regionxgboost.dta", clear  
+input str50 region 
+"East Midlands (138/176,360)" 
+"East of England (143/227,079)" 
+"London (458/1,690,339)" 
+"North East (77/98,275)" 
+"North West (505/815,303)" 
+"South Central (307/625,953)" 
+"South East (292/551,737)" 
+"South West (341/578,496)" 
+"West Midlands (349/520,826)" 
+"Yorkshire & Humber (94/191,202)" 
+end 
+meta set beta st_err, studylab(region) 
+meta summarize, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0.5) 
+graph save "Graph" "\\graphs\ep2_competing\EP2_harrellsC_xgboost.gph", replace  
+clear  
+
+ 
+use "\\estimates\slope_EP2regionxgboost.dta" , clear  
+input str50 region 
+"East Midlands (138/176,360)" 
+"East of England (143/227,079)" 
+"London (458/1,690,339)" 
+"North East (77/98,275)" 
+"North West (505/815,303)" 
+"South Central (307/625,953)" 
+"South East (292/551,737)" 
+"South West (341/578,496)" 
+"West Midlands (349/520,826)" 
+"Yorkshire & Humber (94/191,202)" 
+end 
+meta set slope slope_se, studylab(region) 
+meta summarize, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(1) 
+graph save "Graph" "\\graphs\ep2_competing\EP2_slope_xgboost.gph", replace  
+clear 
+
+ 
+
+use "\\estimates\citl_EP2regionxgboost.dta" , clear  
+input str50 region 
+"East Midlands (138/176,360)" 
+"East of England (143/227,079)" 
+"London (458/1,690,339)" 
+"North East (77/98,275)" 
+"North West (505/815,303)" 
+"South Central (307/625,953)" 
+"South East (292/551,737)" 
+"South West (341/578,496)" 
+"West Midlands (349/520,826)" 
+"Yorkshire & Humber (94/191,202)" 
+end 
+meta set citl citl_se, studylab(region) 
+meta summarize, random(sjonkman) se(khartung) predinterval(95) 
+meta forestplot, random(sjonkman) se(khartung) predinterval(95) xline(0) 
+graph save "Graph" "\\graphs\ep2_competing\EP2_citl_xgboost.gph", replace  
+clear 
+
+******************************************************************************** 
+******************************************************************************** 
+ 
+
+###################################################################################################
+######################################     END   ##################################################
+###################################################################################################
