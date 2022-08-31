@@ -1,0 +1,86 @@
+******************************************************************************** 
+* Title: Prepare endpoint2 dataset for ML in R - pseudovalue based ML modelling  
+* Project: OX129 - risk prediction models for breast cancer  
+* Input: \\data\final_datasets\OX129_endpoint2_competingrisk_IECV.dta 
+* Output: ML-ready files for use in R:
+*             1) Whole cohort for model building 
+*             2) Separate Period 1 and Period 2 datasets for IECV
+* Version: 1 - date 14th February 2022 
+******************************************************************************** 
+
+* Open the dataset formed after IECV of the competing risks model - the ML 
+* models will be in a competing risks framework * 
+
+use "\\data\final_datasets\Endpoint_2\OX129_endpoint2_competingrisk_IECV.dta" , clear  
+
+* convert to long form - m0 at top, then stacked imputations 1,2,3,4,5 *  
+* Within each stack are the sorted patient ds - i.e. the first patid occurs 5 times,  
+* but distrbuted throughout each stack *  
+
+mi convert flong  
+
+* drop the m=0, i.e. complete/non-imputed data *  
+tab _mi_m   
+
+* This is the variable to denote which imputation each row 'belongs' to *  
+* _mi_m==0 is the complete case, original dataset. We only want the 5 imputed datasets * 
+drop if _mi_m==0 
+
+
+* Stack imputations so as to have each patid in blocks of 5; i.e. all patients'  
+* imputations together. For purposes of later modelling in R - sort by sha1,  
+* then by patid, then by imputation number *  
+
+sort sha1 patid _mi_m 
+ 
+* Remove Stata's mi setting - this makes a 'clean' simple stacked dataset *  
+mi unset, asis  
+rename _mi_m imputation    // ease of labelling 
+
+
+******************** 
+* CIF pseudovalues * 
+******************** 
+* Now, we need to calculate the pseudovalues for the CIF * 
+* These were calculated during the prep for the competing risks regression modelling * 
+
+summ pseudo, det  
+summ period1_pseudo, det  
+summ period2_pseudo, det  
+
+
+* Generate dummy variables as more efficient than doing so in R *  
+tab ethnicity, gen(ethnic_group) 
+tab smoke_cat, gen(smoking_category) 
+tab past_oestrogen, gen(past_oestrogen_use)  
+tab past_combined, gen(past_combinedhrt_use)  
+
+* Keep time to event variable (_t) and status indicator in case playing in R with new techniques *  
+rename _t time_to_event 
+gen status = 0  
+replace status = 1 if iecv_event==1  
+tab status   
+
+* Shrink down the dataset to keep only those vars wanted for modelling and evaluation * 
+keep patid sha1 age bmi ethnic_group* fibrocystic past_oestrogen_use* past_combinedhrt_use* fh_breastca smoking_category* ihd  / 
+vasculitis ssri period pseudo period1_pseudo period2_pseudo imputation time_to_event status     
+
+* Save this as an R-ready dataset (to be imported from .dta type) * 
+save "\\data\final_datasets\ML\OX129_endpoint2_stacked5_pseudovalues.dta", replace 
+
+** Form separate datasets for period 1 and period 2 - this will aid IECV in R **  
+use  "\\data\final_datasets\ML\OX129_endpoint2_stacked5_pseudovalues.dta", clear  
+keep if period==1  
+save "\\data\final_datasets\ML\OX129_endpoint2_stacked5_period1_pseudovalues.dta", replace 
+clear  
+
+******************************************************************************** 
+** Again, use previously generated dataset to make data_period2 
+use  "\\data\final_datasets\ML\OX129_endpoint2_stacked5_pseudovalues.dta", clear  
+keep if period==2  
+save "\\data\final_datasets\ML\OX129_endpoint2_stacked5_period2_pseudovalues.dta", replace 
+clear  
+
+******************************************************************************** 
+*********************************** END ****************************************  
+********************************************************************************
