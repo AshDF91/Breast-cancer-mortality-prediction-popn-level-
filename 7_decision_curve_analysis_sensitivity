@@ -1,0 +1,240 @@
+******************************************************************************** 
+* DECISION CURVE ANALYSIS - ENDPOINT 2 MODEL COMPARISONS  
+* Ash Clift  
+* 26th May 2022 
+* Version: 1 
+******************************************************************************** 
+
+
+** Step 1: Obtain mean predictions (per individual, across all imputed datasets)   
+** for each model, save as mini file with patid and mean_prediction **  
+** Call these cox, crr, xgb and nnet - plug into decision curve analysis later ** 
+
+***************
+** Cox model **
+***************
+
+use "\\data\final_datasets\Endpoint_2\OX129_endpoint2_imputed_IECV.dta", clear      // open core dataset, post-IECV
+mi convert wide                                                                     // wide - generates average iecv_xb 
+gen mean_prediction_cox = 1 - period1_baseline_surv_cox^exp(iecv_xb)                // predicted risk = 1 - St^exp(Xb) 
+rename mean_prediction_cox cox                                                      // call 'cox' so easier to graph later 
+keep patid cox  
+summ cox, det  
+save "\\estimates\ML_IECV_predictions\DCA_endpoint2_cox_iecv_predictions_formatted.dta", replace 
+clear  
+
+********************************
+** Competing risks regression **
+********************************
+
+use "\\data\final_datasets\Endpoint_2\OX129_endpoint2_competingrisk_IECV.dta", clear  
+mi convert wide  
+rename iecv_prob crr     
+keep patid crr   
+summ crr, det  
+save "\\estimates\ML_IECV_predictions\DCA_endpoint2_crr_iecv_predictions_formatted.dta", replace 
+clear  
+
+*************
+** XGBoost **
+*************
+
+use "\\estimates\ML_IECV_predictions\endpoint2_xgboost_iecv_predictions_formatted.dta", clear  
+keep patid mean_prediction 
+rename mean_prediction xgb 
+summ xgb, det  
+save "\\estimates\ML_IECV_predictions\DCA_endpoint2_xgboost_iecv_predictions_formatted.dta", replace 
+clear  
+ 
+********************
+** Neural network **
+********************
+
+use "\\qrvfile1\OX129\OX129\estimates\ML_IECV_predictions\endpoint2_nnet_iecv_predictions_formatted.dta", clear  
+keep patid mean_prediction 
+rename mean_prediction nnet  
+summ nnet, det  
+save "\\estimates\ML_IECV_predictions\DCA_endpoint2_nnet_iecv_predictions_formatted.dta", replace 
+clear  
+
+*******************************
+** Import, merge and analyse **
+********************************
+* Use the post-IECV competing risks file - we are performng DCA that takes into account the competing risk of 
+* other, non breast cancer-related death. 
+
+use "\\qrvfile1\OX129\OX129\data\final_datasets\Endpoint_2\OX129_endpoint2_competingrisk_IECV.dta", clear  
+
+* Extract the complete case data - don't need all the imputations... 
+mi extract 0  
+
+* Keep salient variables * 
+keep patid iecv_event follow_up age  
+
+* Merge in these predictions generated above (each person in Period 2's average prediction across the 5 imputations * 
+
+foreach x in cox crr xgboost nnet { 
+merge 1:1 patid using "\\estimates\ML_IECV_predictions\DCA_endpoint2_`x'_iecv_predictions_formatted.dta" 
+drop _merge  
+} 
+
+* Remove mi settings from Stata - don't need it * 
+mi unset, asis 
+stset follow_up, failure(iecv_event==1)  
+
+* Will assess clinical utility of models in different age groups, one of these will be screening age women * 
+gen screen_age = 0  
+replace screen_age = 1 if age>=50 & age<=70 
+tab screen_age  
+
+ 
+* First, for reference, run the version not taking into account competing risks *  
+stdca cox crr xgb nnet, timepoint(10) prob(yes yes yes yes) xstart(0.0001) xby(0.0001) xstop(0.05) nograph saving(dca_ep2_allage_standard, replace) 
+
+*****************************************************************
+** DECISION CURVE ANALYSIS TAKING INTO ACCOUNT COMPETING RISKS **
+*****************************************************************
+
+* Those of any age *  
+stdca cox crr xgb nnet, timepoint(10) prob(yes yes yes yes) xstart(0.0001) xby(0.0001) xstop(0.010)  // 
+nograph saving(dca_ep2_allage_compet, replace) compet1(2) 
+ 
+* Those of screening age at entry only   * 
+stdca cox crr xgb nnet if screen_age==1, timepoint(10) prob(yes yes yes yes) xstart(0.0001) xby(0.0001)  // 
+xstop(0.02) nograph saving(dca_ep2_screenage_compet, replace) compet1(2) 
+
+* Those women too young for screening *  
+stdca cox crr xgb nnet if age<50, timepoint(10) prob(yes yes yes yes) xstart(0.0001) xby(0.0001) xstop(0.010) // 
+nograph saving(dca_ep2_young_compet, replace) compet1(2) 
+
+ 
+* Those women too old for screening *  
+stdca cox crr xgb nnet if age>70, timepoint(10) prob(yes yes yes yes) xstart(0.0001) xby(0.0001) xstop(0.010)  // 
+nograph saving(dca_ep2_older_compet, replace) compet1(2) 
+
+* Now that these results are saved, we graph them by hand * 
+
+clear  
+
+  
+********************
+* Plot the graphs! *
+********************
+************
+* All ages *
+************
+use "\\dca_ep2_allage_compet.dta"   
+replace all = . if threshold > 0.004           // for axis plotting: lots of missing values above this (not estimable) 
+
+twoway line all threshold || line cox threshold || line crr threshold || line xgb threshold || line nnet threshold || line none threshold, //
+xsc(range(0.0001 0.006)) aspect(0.75)  
+
+graph save "Graph" "\\graphs\ep2_all\DCA_all_ages_competing.gph", replace  
+clear  
+
+*****************************
+* Screening age people only *
+*****************************
+use "\\dca_ep2_screenage_compet.dta"   
+drop if threshold > 0.007                        // for axis plotting: lots of missing values above this (not estimable) 
+
+twoway line all threshold || line cox threshold || line crr threshold || line xgb threshold || line nnet threshold || line none threshold,  // 
+xsc(range(0.0001 0.0083)) aspect(0.75)  
+
+graph save "Graph" "\\graphs\ep2_all\DCA_screening_age_only_competing.gph", replace  
+clear  
+
+*****************
+* Pre-screening *
+*****************
+use "\\qrvfile1\OX129\ado\plus\dca_ep2_young_compet.dta"   
+drop if threshold > 0.0015                    // for axis plotting: lots of missing values above this (not estimable) 
+
+twoway line all threshold || line cox threshold || line crr threshold || line xgb threshold || line nnet threshold || line none threshold, aspect(0.75)  
+
+graph save "Graph" "\\graphs\ep2_all\DCA_young_competing.gph", replace  
+clear  
+
+****************************
+* Older than screening age *
+****************************
+
+use "\\qrvfile1\OX129\ado\plus\dca_ep2_older_compet.dta"   
+
+twoway line all threshold || line cox threshold || line crr threshold || line xgb threshold || line nnet threshold || line none threshold, aspect(0.75) 
+
+graph save "Graph" "P:\OX129\OX129\graphs\ep2_all\DCA_older_competing.gph", replace  
+
+clear  
+
+********************************************************************************************
+********************************************************************************************
+
+ 
+
+*********************************** 
+** Risk thresholds - sensitivity ** 
+***********************************  
+
+* Open post-IECV competing risks dataset *   
+
+use "\\data\final_datasets\Endpoint_2\OX129_endpoint2_competingrisk_IECV.dta", clear  
+
+* Don't need imputed data 0 just going to merge in predictions, so keep the IDs and status/follow-up times * 
+mi extract 0  
+keep if period==2 
+
+* Keep salient variables * 
+keep patid iecv_event follow_up age  
+
+ 
+* Merge in the average predictions - same ones used for decision curve analysis * 
+
+foreach x in cox crr xgboost nnet { 
+merge 1:1 patid using "\\estimates\ML_IECV_predictions\DCA_endpoint2_`x'_iecv_predictions_formatted.dta" 
+drop _merge  
+} 
+
+ 
+
+* Unset the mi setting - plain old stset, use  
+mi unset, asis 
+stset follow_up, failure(iecv_event==1) exit(time 10)    // events that occurred within 10 years; align with model prediction horizons 
+tab _d  
+
+ 
+
+** Split the predicted risk distribtuions into percentiles **  
+
+xtile cox_percentile = cox, nq(100) 
+xtile crr_percentile = crr, nq(100) 
+xtile xgb_percentile = xgb, nq(100) 
+xtile nnet_percentile = nnet, nq(100) 
+
+
+** Count the cumulative breast cancer deaths captured in each risk group **  
+
+** COX MODEL ** 
+foreach x in 100 99 98 97 96 91 86 81 76 51 { 
+tab _d if cox_percentile>=`x' 
+} 
+
+** COMPETING RISKS REGRESSION **  
+foreach x in 100 99 98 97 96 91 86 81 76 51 { 
+tab _d if crr_percentile>=`x' 
+} 
+
+** XGBOOST **  
+foreach x in 100 99 98 97 96 91 86 81 76 51 { 
+tab _d if xgb_percentile>=`x' 
+} 
+ 
+** NEURAL NETWORK **  
+foreach x in 100 99 98 97 96 91 86 81 76 51 { 
+tab _d if nnet_percentile>=`x' 
+} 
+
+clear all 
+*******************************************************************************
+**********************************  END   *************************************
+*******************************************************************************
