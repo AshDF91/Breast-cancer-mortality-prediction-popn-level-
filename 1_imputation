@@ -1,0 +1,156 @@
+******************************************************************************** 
+* Title: Multiple imputation for endpoint 2 models - risk of breast cancer  
+*        mortality at the population level  
+* Project: OX129  
+* Input: "\\data\final_datasets\OX129_endpoint2.dta" 
+* Output:  one multiply imouted dataset - 
+* Author: Ash Clift 
+* Date: 27th January 2022  
+* Notes: Multiply impute missing values for BMI, Townsend, alcohol intake, smoking, 
+* and ethnicity. 5 imputations generated for use throughout model building and eval. 
+******************************************************************************** 
+
+
+************************************************ 
+* Open the complete case dataset - not imputed * 
+************************************************  
+use "\data\final_datasets\Endpoint_2\OX129_endpoint2.dta", clear  
+
+
+*********************************** 
+* Format variables as appropriate * 
+***********************************   
+
+* Form 'previous gynaecological cancer' variable - composite of binary variables that cover: *
+* ovarian cancer (ovarianca), uterine cancer (uterineca) and endometrial cancer (endometrialca) * 
+gen previous_gynae_cancer = 0  
+replace previous_gynae_cancer = 1 if ovarianca==1 | uterineca==1 | endometrialca==1 
+tab previous_gynae_cancer  
+drop ovarianca uterineca endometrialca  
+
+* Ethnicity classification - in view of event counts in Period 2 (evaluation set) *  
+tab ethnicgroupid      // 16 level categories - condense into coarser groups for purposes of assessing heterogeneity 
+gen ethnicity = .  
+
+* White (British, Irish, other) *  
+replace ethnicity = 1 if ethnicgroupid==1 | ethnicgroupid==2 | ethnicgroupid==3 
+
+* South Asian (Indian, Pakistani, Bangladeshi) *  
+replace ethnicity = 2 if ethnicgroup==8 | ethnicgroup==9 | ethnicgroup==10 
+
+* Other Asian (e.g. Eastern Asia, non-Chinese) *  
+replace ethnicity = 3 if ethnicgroup==11 
+
+* Black Caribbean, Black African or other Black *  
+replace ethnicity = 4 if ethnicgroup==12 | ethnicgroup==13 | ethnicgroup==14 
+
+* Chinese *  
+replace ethnicity = 5 if ethnicgroup==15 
+
+* Other race, including mixed, Arab *  
+replace ethnicity = 6 if ethnicgroup==4 | ethnicgroup==5 | ethnicgroup==6 | ethnicgroup==7 | ethnicgroup==16  
+
+ 
+* label the new variable *  
+la de ethnicgroupings 1 " White" 2 "South Asian" 3 "Other Asian" 4 "Black" 5 "Chinese" 6 "Other, mixed race, Arab"  
+la val ethnicity ethnicgroupings 
+tab ethnicity, m                       // Use this one going forwards in modelling/evaluation. Some have very low event numbers on prelim checks
+
+
+********************************************************************* 
+* Stset the data - estimate Nelson-Aalen cumulative hazard function * 
+*********************************************************************  
+* Tabulate events - d_breastcancer = breast cancer death (of interest) *  
+* exit3status = contains all cause death (use to define competing event), 1 = died, 0 = did not die *  
+
+tab d_breastcancer  
+tab exit3status 
+la de events 0 "Censored" 1 "Died - breast cancer" 2 "Died - competing risk" 
+gen endpoint = 0  
+replace endpoint = 1 if d_breastcancer==1  
+replace endpoint = 2 if (exit3status==1 & d_breastcancer==0)  // death certificate available, but breast ca not on it 
+la val endpoint events   
+tab endpoint  
+
+
+* Make follow-up time variable *  
+gen time = exit3date - enter3  
+replace time = time/365.25        // scale is years  
+
+* Stset the data *  
+stset time, failure(endpoint==1) 
+
+* Estimate Nelson-Aalen estimate of cumulative hazard function - use in imputation model *  
+sts gen nelson_aalen = na  
+summ nelson_aalen  
+
+
+********************************************************************************* 
+* Estimate jack--knife pseudo-observations for Aalen-Johansen CIF - used later * 
+********************************************************************************* 
+* Estimate Aalen-Johanssen Cumulative Incidence Function pseudo-observations *  
+stpci, at(10) gen(pseudo_varselect_crr) 
+summ pseudo_varselect_crr, det             // pseudo-obs for CIF at 10yrs, in whole cohort 
+
+********************************************* 
+* Set up data ready for multiple imputation * 
+********************************************* 
+* Examine missingness *  
+tab smoke_cat, m  
+tab alcohol_cat, m  
+tab ethnicity, m  
+summ baseline_bmi, det  
+count if baseline_bmi==.  
+count if town_int==.   
+
+* Tab event counts in ethnic sub-groups before modelling *  
+tab ethnicity endpoint, m  
+tab ethnicity endpoint if period==2 , m  
+
+* Assess for skew of BMI - ?needs log transform? *  
+histogram baseline_bmi, percent normal   // yes, log transform better fits normal distribution visually 
+gen ln_bmi = log(baseline_bmi) 
+histogram ln_bmi, percent normal  
+
+* Ranges of ln-transformed BMI for imputation model *  
+summ ln_bmi, det    // we will impute the natural log, then transform back for analysis. 
+
+* Fill in zeros for never-users of HRT *  
+foreach x in recent_oestrogen past_oestrogen recent_combinedhrt past_combinedhrt {  
+    replace `x' = 0 if `x'==. 
+} 
+tab recent_oestrogen  
+tab past_oestrogen  
+tab recent_combinedhrt  
+tab past_combinedhrt 
+
+* Set up data ready - mi set wide *  
+mi set wide  
+
+* Register variables to be imputed *  
+mi register imputed smoke_cat alcohol_cat ln_bmi town_int ethnicity  
+
+* Set the imputation model off *  
+* This contains temporal period (i.period), N-A CHF (nelson_aalen) as auxiliary variables *  
+* Imputation model contains endpoint indicator as well *  
+
+timer on 1  
+mi impute chained (ologit, ascontinuous) smoke_cat alcohol_cat (truncreg, ll(2.70805) ul(3.850147)) ///
+ln_bmi (truncreg, ll(-7) ul(11)) town_int (mlogit, ascontinuous) ethnicity = age i.ckd i.pcos i.htn i.ihd  //
+i.lungca i.bloodca i.thyroidca i.cirrhosis i.lupus i.vasculitis i.endometriosis i.psychosis i.fibrocystic  //
+i.fh_breastca i.hysterectomy i.thiazide i.betablocker i.raa i.acei i.cablocker i.tca i.maoi i.ssri i.ocp  // 
+i.recent_oestrogen i.past_oestrogen i.recent_combinedhrt i.past_combinedhrt i.type1dm i.type2dm i.fh_gynaeca //
+i.anti_psychotic i.previous_biopsy i.previous_gynae_cancer i.period i.endpoint nelson_aalen,  // 
+add(5) rseed(1066) augment chaindots  
+
+timer off 1  
+timer list  
+
+************************ 
+* Save imputed dataset * 
+************************  
+save "\\final_datasets\Endpoint_2\OX129_endpoint2_imputed_new.dta", replace  
+clear  
+
+******************************************************************************** 
+********************************************************************************
