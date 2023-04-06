@@ -1,0 +1,843 @@
+*GP Read/SNOMED variables*  
+
+use "OX129_diagnosis_summary_long.dta", clear  
+
+tab varname  
+
+** AIM: have one row per patient, with columns for each readcode group **  
+** Therefore, able to merge in to main cohort file and define baseline factors (using presence of code and accompanying date) **  
+reshape wide varname min, i(patid) j(codegroupid) 
+
+** Double check that one row per patid **  
+duplicates report patid  
+
+** Reshaping has named each column varname **  
+** In turn, rename each readcode group to reflect what it denotes, and also its accompanying first record **  
+** For each one, tab it, to check that correct label has been attached **  
+rename varname1913 type1 
+rename min1913 min_type1 
+tab type1 
+rename varname2411 type2 
+rename min2411 min_type2 
+tab type2 
+rename varname3258 smoking109 
+rename min3258 min_smoking109 
+tab smoking109 
+rename varname11397 pcos 
+rename min11397 min_pcos 
+tab pcos  
+rename varname11398 htn 
+rename min11398 min_htn 
+tab htn 
+rename varname11399 ihd 
+rename min11399 min_ihd 
+tab ihd 
+rename varname11400 lungca 
+rename min11400 min_lungca 
+tab lungca 
+rename varname11401 ovarianca 
+rename min11401 min_ovarianca 
+tab ovarianca 
+rename varname11402 uterineca 
+rename min11402 min_uterineca 
+tab uterineca  
+rename varname11403 breastca 
+rename min11403 min_breastca 
+tab breastca 
+rename varname11404 bloodca 
+rename min11404 min_bloodca 
+tab bloodca 
+rename varname11405 thyroidca 
+rename min11405 min_thyroidca 
+tab thyroidca 
+rename varname11406 cirrhosis 
+rename min11406 min_cirrhosis 
+tab cirrhosis  
+rename varname11407 t1dm 
+rename min11407 min_t1dm 
+tab t1dm 
+rename varname11408 t2dm 
+rename min11408 min_t2dm 
+tab t2dm 
+rename varname11409 dialysistransplant 
+rename min11409 min_dialysistransplant 
+tab dialysistransplant 
+rename varname11410 ckd3 
+rename min11410 min_ckd3 
+tab ckd3 
+rename varname11411 ckd4 
+rename min11411 min_ckd4 
+tab ckd4  
+rename varname11412 ckd5 
+rename min11412 min_ckd5 
+tab ckd5 
+rename varname11416 fh_ovarianca 
+rename min11416 min_fh_ovarianca 
+tab fh_ovarianca 
+rename varname11417 fh_uterineca 
+rename min11417 min_fh_uterineca 
+tab fh_uterineca 
+rename varname11418 fh_genitalca 
+rename min11418 min_fh_genitalca 
+tab fh_genitalca 
+rename varname11420 non_smoker 
+rename min11420 min_non_smoker 
+tab non_smoker 
+rename varname11421 mod_smoker 
+rename min11421 min_mod_smoker 
+tab mod_smoker 
+rename varname11422 heavy_smoker 
+rename min11422 min_heavy_smoker 
+tab heavy_smoker 
+rename varname11423 light_smoker 
+rename min11423 min_light_smoker 
+tab light_smoker 
+rename varname11703 alcohol 
+rename min11703 min_alcohol 
+tab alcohol 
+rename varname11774 lupus 
+rename min11774 min_lupus 
+tab lupus 
+rename varname11775 vasculitis 
+rename min11775 min_vasculitis 
+tab vasculitis 
+rename varname11776 endometriosis 
+rename min11776 min_endometriosis 
+tab endometriosis 
+rename varname11777 psychosis 
+rename min11777 min_psychosis 
+tab psychosis 
+rename varname11782 fibrocystic 
+rename min11782 min_fibrocystic 
+tab fibrocystic 
+rename varname11785 menopause 
+rename min11785 min_menopause 
+tab menopause 
+rename varname13219 endometrialca 
+rename min13219 min_endometrialca 
+tab endometrialca 
+rename varname13220 ex_smoker 
+rename min13220 min_ex_smoker 
+tab ex_smoker 
+rename varname13221 breast_insitu 
+rename min13221 min_breast_insitu 
+tab breast_insitu 
+rename varname13262 fh_breastca 
+rename min13262 min_fh_breastca 
+tab fh_breastca  
+
+
+** Merge in file with patid and cohort entry date - this will enable appropriate ascertainment of diagnoses, etc. at baseline, i.e. when risk predictions are made **  
+merge 1:1 patid using " OX129_patid_enter3_only.dta" 
+keep if _merge==3 
+ 
+** Set up loop over each covariate and classify whether or not it was recorded on/before entry date**  
+** Only counts if diagnosed on or before the day of entry** 
+** New variables generated specifying _baseline suffix (also avoids issue with format of varname cells)** 
+
+foreach x of varlist type1 type2 smoking109 pcos htn ihd lungca ovarianca uterineca breastca bloodca thyroidca cirrhosis t1dm t2dm dialysistransplant ckd3 ckd4 ckd5 fh_ovarianca fh_uterineca fh_genitalca non_smoker mod_smoker heavy_smoker light_smoker alcohol lupus vasculitis endometriosis psychosis fibrocystic menopause nulliparous endometrialca ex_smoker breast_insitu fh_breastca { 
+
+  generate `x'_baseline = . 
+  replace `x'_baseline=1 if min_`x'<=enter3 
+  } 
+
+
+** To keep last code safe from post-enter3 records interfering with latest recorded smoking, parity data, set all dates>enter3 to missing **  
+foreach x of varlist type1 type2 smoking109 pcos htn ihd lungca ovarianca uterineca breastca bloodca thyroidca cirrhosis t1dm t2dm dialysistransplant ckd3 ckd4 ckd5 fh_ovarianca fh_uterineca fh_genitalca non_smoker mod_smoker heavy_smoker light_smoker alcohol lupus vasculitis endometriosis psychosis fibrocystic menopause nulliparous endometrialca ex_smoker breast_insitu  fh_breastca { 
+  replace min_`x' = . if min_`x'>enter3 
+  } 
+
+
+******************************************************************************** 
+**                           Smoking status at baseline                       **  
+******************************************************************************** 
+
+** Find last recorded smoking status date **  
+gen last_smoking = . 
+replace last_smoking = max(min_non_smoker, min_ex_smoker, min_light_smoker, min_mod_smoker, min_heavy_smoker) 
+
+** counts of last smoking statuses pre-enter3 date **  
+count if (last_smoking==min_non_smoker & last_smoking!=.) 
+count if (last_smoking==min_ex_smoker & last_smoking!=.) 
+count if (last_smoking==min_light_smoker & last_smoking!=.) 
+count if (last_smoking==min_mod_smoker & last_smoking!=.) 
+count if (last_smoking==min_heavy_smoker & last_smoking!=.) 
+
+** Generate new smoking_baseline variable. Complete this variable using the last recorded smoking status info** 
+gen smoking_baseline = . 
+replace smoking_baseline = 1 if (last_smoking==min_non_smoker & last_smoking!=.) 
+replace smoking_baseline = 2 if (last_smoking==min_ex_smoker & last_smoking!=.) 
+replace smoking_baseline = 3 if (last_smoking==min_light_smoker & last_smoking!=.) 
+replace smoking_baseline = 4 if (last_smoking==min_mod_smoker & last_smoking!=.) 
+replace smoking_baseline = 5 if (last_smoking==min_heavy_smoker & last_smoking!=.) 
+tab smoking_baseline, m 
+
+
+label define smoking 1 "Non-smoker" 2 "Ex-smoker" 3 "Light smoker (1-9/day)" 4 "Moderate smoker (10-19/day)" 5 "Heavy smoker (20+/day)" 
+label values smoking_baseline smoking
+
+** Tabulate out**  
+tab smoking_baseline, m 
+
+******************************************************************************** 
+**                  Chronic kidney disease status at baseline                 **  
+******************************************************************************** 
+
+tab ckd3_baseline  
+tab ckd4_baseline  
+tab ckd5_baseline  
+tab dialysistransplant_baseline 
+gen last_renal = max(min_ckd3, min_ckd4, min_ckd5, min_dialysistransplant) 
+format last_renal %td  
+
+count if (last_renal==min_ckd3 & last_renal!=.) 
+count if (last_renal==min_ckd4 & last_renal!=.) 
+count if (last_renal==min_ckd5 & last_renal!=.) 
+count if (last_renal==min_dialysis & last_renal!=.) 
+generate kidney_baseline = .  
+replace kidney_baseline = 1 if (last_renal==min_ckd3 & last_renal!=.) 
+replace kidney_baseline = 2 if (last_renal==min_ckd4 & last_renal!=.) 
+replace kidney_baseline = 3 if (last_renal==min_ckd5 & last_renal!=.) 
+replace kidney_baseline = 3 if (last_renal==min_dialysis & last_renal!=.) 
+ 
+label define kidneys 1 "CKD stage 3" 2 "CKD stage 4" 3 "CKD stage 5 (inc. dialysis/transplant)" 
+label values kidney_baseline kidneys  
+tab kidney_baseline, m  
+
+ ********************************************************************************
+ 
+** Keep only those variables considered for risk modelling. Also keep patid to help merge later ** 
+
+keep patid type1_baseline type2_baseline pcos_baseline htn_baseline ihd_baseline lungca_baseline 
+ovarianca_baseline uterineca_baseline breastca_baseline bloodca_baseline thyroidca_baseline cirrhosis_baseline 
+t1dm_baseline t2dm_baseline fh_ovarianca_baseline fh_uterineca_baseline fh_genitalca_baseline lupus_baseline 
+vasculitis_baseline endometriosis_baseline psychosis_baseline fibrocystic_baseline menopause_baseline 
+endometrialca_baseline breast_insitu_baseline fh_breastca_baseline smoking_baseline kidney_baseline 
+
+
+******************************************************************************** 
+**                      Tabulate final baseline numbers                       **  
+******************************************************************************** 
+
+foreach x of varlist type1_baseline-kidney_baseline { 
+  tab `x' 
+  } 
+
+********************************************************************************
+ save "OX129_diagnoses_cleaned.dta", replace  
+ ** END **  
+
+**********
+*HES data*  
+**********
+
+use "OX129_hes_procedureevents.dta" , clear  
+tab codegroupid  
+** 11822 = breast biopsy **  
+** 13256 = hysterectomy **   
+keep if codegroupid==13256 
+count  
+duplicates report patid 
+
+** Sort by date for each/any repeated instance of hysterectomy, and keep first instance **  
+sort patid admidate 
+duplicates tag patid, generate(repeated) 
+keep if repeated==0  
+count  
+
+** Now, merge with reference file that contains patid and cohort entry date **  
+** This will allow us to identfy the participants that had a history of hysterectomy at baseline and therefore should be classified as so for the risk models **  
+merge 1:1 patid using "OX129_patid_enter3_only.dta" 
+
+** keep the ones that have merged, i.e. have a hysterectomy recorded **  
+keep if _merge==3 
+
+** describe the numbers with a previous hysterectomy, vs. those that later had done during follow-up ** 
+count if admidate<=enter3 
+count if admidate>enter3 
+keep if admidate<=enter3  
+count  
+
+** Reformat/rename as appropriate, so we have a single database detailing which patid have had a hysterectomy **  
+** Keep the date, as we will want to merge into main cohort file, and identfy those that had a hysterectomy history at entry **  
+
+gen hysterectomy = 1 
+keep patid hysterectomy 
+save "OX129_hysterectomy.dta", replace  
+clear  
+******************************************************************************** 
+
+*************
+*BMI values *
+*************
+use "OX129_value_observations_200.dta" , clear  
+count 
+summ numericvalue, detail  
+sort patid effectivedatetime  
+
+* merge with file that contains only patid and cohort entry date - latter is used to find most recent measurement prior to or at cohort entry * 
+merge m:1 patid using "OX129_patid_enter3_only.dta" 
+keep if _merge==3  
+
+* Look at raw numbers of measurements before and after entery date *  
+count if effectivedatetime>enter3 
+count if effectivedatetime<=enter3  
+* Drop any measurement that occurred after entry date *  
+drop if effectivedatetime>enter3  
+
+* Generate two variables - one to sequentially count number of observations for each participant, and another to note the total number of observations that that perticipant has*  
+* As we have dropped any observation after cohort entry, the highest numbered observation for each participant will be the most recent measurement to baseline *  
+
+bys patid: gen n = _n 
+bys patid: gen N = _N 
+keep if n==N 
+
+* Quick check that we have no duplicated patid *  
+duplicates report patid  
+
+* summarise final data *  
+summ numericval, detail  
+
+* Prepare to save as cleaned dataset ready to merge into main analysis files * 
+rename numericval baseline_bmi  
+keep patid baseline_bmi 
+save "OX129_bmi_cleaned.dta", replace  
+
+clear 
+******************************************************************************** 
+
+
+use "OX129_hes_events.dta", clear   
+count  
+tab varname  
+drop flag max count 
+
+** AIM: have one row per patient, with columns for each readcode group **  
+** Therefore, able to merge in to main cohort file and define baseline factors (using presence of code and accompanying date) **  
+reshape wide varname min, i(patid) j(codegroupid) 
+
+** Double check that one row per patid **  
+duplicates report patid  
+
+
+** Reshaping has named each column varname **  
+** In turn, rename each readcode group to reflect what it denotes, and also its accompanying first record **  
+** For each one, tab it, to check that correct label has been attached **  
+
+rename varname11424 breastca 
+rename min11424 min_breastca 
+rename varname11425 ihd 
+rename min11425 min_ihd 
+rename varname11426 bloodca 
+rename min11426 min_bloodca 
+rename varname11427 ovarianca 
+rename min11427 min_ovarianca 
+rename varname11429 lungca 
+rename min11429 min_lungca 
+rename varname11430 thyroidca 
+rename min11430 min_thyroidca 
+rename varname11789 uterineca 
+rename min11789 min_uterineca 
+rename varname11790 endometrialca 
+rename min11790 min_endometrialca 
+rename varname11798 htn 
+rename min11798 min_htn 
+rename varname11801 t1dm 
+rename min11801 min_t1dm 
+rename varname11802 t2dm 
+rename min11802 min_t2dm 
+rename varname11805 cirrhosis 
+rename min11805 min_cirrhosis 
+rename varname11807 lupus 
+rename min11807 min_lupus 
+rename varname11809 psychosis 
+rename min11809 min_psychosis 
+rename varname11811 fibrocystic 
+rename min11811 min_fibrocystic 
+rename varname11813 pcos 
+rename min11813 min_pcos 
+rename varname11815 endometriosis 
+rename min11815 min_endometriosis 
+rename varname11817 breast_insitu 
+rename min11817 min_breast_insitu 
+rename varname11819 vasculitis 
+rename min11819 min_vasculitis
+rename varname11821 fh_breastca  
+rename min11821 min_fh_breastca 
+
+** Merge in file with patid and cohort entry date - this will enable appropriate ascertainment of diagnoses, etc. at baseline, i.e. when risk predictions are made **  
+
+merge 1:1 patid using "OX129_patid_enter3_only.dta" 
+keep if _merge==3 
+
+** Set up loop over each covariate and classify whether or not it was recorded on/before entry date**  
+** Only counts if diagnosed on or before the day of entry**
+** New variables generated specifying _baseline suffix (also avoids issue with format of varname cells)** 
+
+foreach x of varlist breastca ihd bloodca ovarianca lungca thyroidca uterineca endometrialca htn t1dm t2dm cirrhosis lupus psychosis fibrocystic pcos endometriosis breast_insitu vasculitis fh_breastca { 
+  generate `x'_hes = .
+  replace `x'_hes=1 if min_`x'<=enter3 
+  } 
+
+******************************************************************************** 
+**            Tabulate final hes diagnoses at baseline numbers                **  
+******************************************************************************** 
+
+foreach x of varlist breastca_hes-fh_breastca_hes { 
+  tab `x' 
+  } 
+
+******************************************************************************** 
+
+keep patid breastca_hes ihd_hes bloodca_hes ovarianca_hes lungca_hes thyroidca_hes uterineca_hes endometrialca_hes htn_hes t1dm_hes t2dm_hes cirrhosis_hes lupus_hes psychosis_hes fibrocystic_hes pcos_hes endometriosis_hes breast_insitu_hes vasculitis_hes fh_breastca_hes 
+ save "OX129_hes_diagnoses_cleaned.dta", replace  
+
+ clear   
+ 
+*Merge GP diagnoses with HES diagnoses *  
+use "OX129_diagnoses_cleaned.dta" 
+merge 1:1 patid using "OX129_hes_diagnoses_cleaned.dta" 
+
+** Make new 'simple' variables for each clinical status/event of interest ** 
+** Use the Readcode and HES data to ascertain 1/0 for these **  
+
+gen t1dm = .  
+gen t2dm = .  
+gen pcos = .  
+gen htn = .  
+gen ihd = .  
+gen lungca = .  
+gen ovarianca =.  
+gen uterineca = .  
+gen breastca = .  
+gen bloodca = .  
+gen thyroidca = . 
+gen cirrhosis = .  
+gen fh_ovarianca = .  
+gen fh_uterineca = .  
+gen fh_genitalca = .  
+gen lupus = .  
+gen vasculitis = .  
+gen endometriosis = .  
+gen psychosis = . 
+gen fibrocystic = . 
+gen menopause = . 
+gen endometrialca = .  
+gen breast_insitu = . 
+gen fh_breastca = .  
+
+** Loop through variables for which there is Read and HES data **  
+foreach x in pcos htn ihd lungca ovarianca uterineca breastca bloodca thyroidca cirrhosis lupus vasculitis endometriosis psychosis fibrocystic endometrialca breast_insitu fh_breastca { 
+replace `x' = 1 if `x'_baseline==1 
+replace `x' = 1 if `x'_hes==1 
+} 
+
+** Go through variables where different code groups are available, or those that or only on Read **  
+replace t1dm = 1 if (type1_baseline==1 | t1dm_baseline==1 | t1dm_hes==1) 
+replace t2dm = 1 if (type2_baseline==1 | t2dm_baseline==1 | t2dm_hes==1) 
+replace fh_ovarianca = 1 if fh_ovarianca_baseline==1  
+replace fh_uterineca = 1 if fh_uterineca_baseline==1  
+replace fh_genitalca = 1 if fh_genitalca_baseline==1  
+replace menopause = 1 if menopause_baseline==1 
+
+** Slim down dataset for final merge into analysis dataset **  
+keep patid smoking_baseline parity_baseline kidney_baseline t1dm-fh_breastca 
+rename smoking_baseline smoking  
+rename parity_baseline parity 
+rename kidney_baseline ckd  
+save "OX129_final_diagnoses.dta", replace  
+clear  
+
+
+**************************************************************************** 
+use "OX129_smoking_long.dta" , clear  
+
+** Quick look at spread of smoking categorisation *  
+tab smoke_cat, m  
+
+** Look at continuous measurement data availability **  
+count if numericval!=.  
+
+** Other analysis found that after excluding duplicates - only 2.845 million had continuous smoking data **  
+** Plan: use smoking categories - widely used by clinicians in coding - we have a widely used, generally accepted way to measure smokng so imputing a much sparser data field is unnecesary**  
+** Merge with ID and entry date to identify measurements after study entry **   
+
+merge m:1 patid using "OX129_patid_enter3_only.dta" 
+keep if _merge==3 
+
+** Exclude inappropriate records after entry date **  
+drop if smoke_date>enter3 
+
+** Sorting allows identification of latest recorded smoking status **  
+sort patid smoke_date 
+by patid: gen n = _n 
+by patid: gen N = _N 
+keep if n==N  
+duplicates report patid 
+tab smoke_cat, m  
+keep patid smoke_cat  
+save "OX129_smoking_clean.dta", replace  
+
+******************************************************************************** 
+
+*Alcohol *  
+use "OX129_alcohol_long.dta" , clear  
+
+** Quick look at spread of alcohol intake categorisation *  
+tab alcohol_cat6, m  
+
+** Look at continuous measurement data availability **  
+count if numericval!=.  
+
+** Other analysis found that after excluding duplicates - only 3.71 million had continuous units/week data **  
+
+** Plan: use alcohol categories - much less sparsty to impute and decent quality data using categories **  
+** Merge with ID and entry date to identify measurements after study entry **   
+
+merge m:1 patid using "OX129_patid_enter3_only.dta" 
+keep if _merge==3 
+
+** Exclude inappropriate records after entry date **  
+drop if alcohol_date>enter3 
+
+** Sorting allows identification of latest recorded smoking status **  
+sort patid alcohol_date 
+by patid: gen n = _n 
+by patid: gen N = _N 
+keep if n==N  
+duplicates report patid 
+tab alcohol_cat, m  
+keep patid alcohol_cat  
+save "OX129_alcohol_clean.dta", replace  
+
+clear  
+
+******************************************************************************** 
+
+*Prescriptions in GP records *  
+
+foreach x in 740 751 758 759 760 765 807 808 812 813 814 815 922 11784 { 
+use "OX129_drug_scripts_`x'.dta" 
+merge m:1 patid using "OX129_patid_enter3_only.dta"
+keep if _merge==3 
+drop if effectivedatetime>enter3 
+sort patid effectivedatetime 
+bys patid: gen n = _n  
+bys patid: gen N = _N 
+keep if n==N  
+gen drug_`x' = .  
+replace drug_`x' = 1 if N>=3 
+drop if drug_`x'==.  
+keep patid drug_`x' 
+save "OX129_drugs_`x'.dta", replace 
+clear  
+} 
+
+clear  
+
+******************************************************************************** 
+
+** Open event level HRT prescription data **  
+use "OX129_drug_scripts_11784.dta" 
+
+** Merge with patient-level entry date data - drop prescriptions that occurred after cohort entry - we are looking to establish baseline/previous exposures **  
+merge m:1 patid using "OX129_patid_enter3_only.dta" 
+keep if _merge==3  
+drop if effectivedatetime > enter3 
+
+* Also drop if raloxifene prescriptions - only want HRT and tibolone * 
+drop if dmdcode== "239811000001103"  
+
+** Find start and last dates of HRT prescriptions **  
+sort patid effectivedatetime 
+by patid: egen startdate = min(effectivedatetime) 
+format startdate %td  
+by patid: egen lastdate = max(effectivedatetime) 
+format lastdate %td  
+gen hrt_duration = (lastdate-startdate)/365.25  
+summ hrt_duration, det  
+
+
+** Deeper dive into prescriptions *  
+by patid: gen n = _n 
+summ n, det  
+histogram n, percent  
+graph save "Graph" "graphs\HRT_number_scripts.gph", replace  
+histogram n if n<100, percent 
+graph save "Graph" "graphs\HRT_number_scripts_under100.gph", replace  
+
+gen time_since_first_hrt = effectivedatetime - startdate  
+gen time_between_scripts = time_since_first_hrt/n 
+summ time_between_scripts, det  
+summ time_between_scripts if time_between_scripts>1 & time_between_scripts<500, det  
+histogram time_between_scripts if time_between_scripts>1 & time_between_scripts<500, percent 
+graph save "Graph" "graphs\HRT_time_between_scripts.gph", replace  
+
+
+**************************************** 
+** Classifying HRT class and duration ** 
+****************************************  
+* Oestrogen-only HRT; combination HRT; tibolone *  
+* <1yr ; 1-2yrs ; 3-4yrs ; 5-9yrs ; 10+ yrs *  
+
+* Classes *  
+gen oestrogen = 0  
+gen combined = 0  
+gen tibolone = 0  
+ 
+replace oestrogen = 1 if dmdcode== "325541008" 
+replace oestrogen = 1 if dmdcode== "3053511000001101" 
+replace oestrogen = 1 if dmdcode== "9045511000001101" 
+replace oestrogen = 1 if dmdcode== "2949711000001109"  
+replace oestrogen = 1 if dmdcode== "9045311000001107" 
+replace oestrogen = 1 if dmdcode== "2893711000001109" 
+replace oestrogen = 1 if dmdcode== "9044911000001109" 
+replace oestrogen = 1 if dmdcode== "2936011000001100" 
+replace oestrogen = 1 if dmdcode== "325482006"  
+replace oestrogen = 1 if dmdcode== "2903111000001101"  
+replace oestrogen = 1 if dmdcode== "2845811000001107" 
+replace oestrogen = 1 if dmdcode== "4501411000001105" 
+replace oestrogen = 1 if dmdcode== "4548011000001100" 
+replace oestrogen = 1 if dmdcode== "325542001" 
+replace oestrogen = 1 if dmdcode== "11738011000001105" 
+replace oestrogen = 1 if dmdcode== "2939611000001104"  
+replace oestrogen = 1 if dmdcode== "4501811000001107"  
+replace oestrogen = 1 if dmdcode== "4501211000001106"  
+replace oestrogen = 1 if dmdcode== "2841811000001109"  
+replace oestrogen = 1 if dmdcode== "32554009"  
+replace oestrogen = 1 if dmdcode== "2890411000001106"  
+replace oestrogen = 1 if dmdcode== "32548003"  
+replace oestrogen = 1 if dmdcode== "9045111000001105"  
+replace oestrogen = 1 if dmdcode== "2838411000001101"  
+replace oestrogen = 1 if dmdcode== "3455511000001109"  
+replace oestrogen = 1 if dmdcode== "2842511000001103"  
+replace oestrogen = 1 if dmdcode== "3657811000001104"  
+replace oestrogen = 1 if dmdcode== "2846111000001106"  
+replace oestrogen = 1 if dmdcode== "2889111000001107"  
+replace oestrogen = 1 if dmdcode== "2845111000001100"  
+replace oestrogen = 1 if dmdcode== "2902911000001105"  
+replace oestrogen = 1 if dmdcode== "3658611000001104"  
+replace oestrogen = 1 if dmdcode== "9045711000001106"  
+replace oestrogen = 1 if dmdcode== "2938411000001105"  
+replace oestrogen = 1 if dmdcode== "86011000001100"  
+replace oestrogen = 1 if dmdcode== "3649411000001108"  
+replace oestrogen = 1 if dmdcode== "2836011000001106"  
+replace oestrogen = 1 if dmdcode== "2890211000001107"  
+replace oestrogen = 1 if dmdcode== "2845411000001105"  
+replace oestrogen = 1 if dmdcode== "3414911000001105"  
+replace oestrogen = 1 if dmdcode== "2948411000001106"  
+replace oestrogen = 1 if dmdcode== "2837211000001104"  
+replace oestrogen = 1 if dmdcode== "2942311000001102"  
+replace oestrogen = 1 if dmdcode== "34911000001102"  
+replace oestrogen = 1 if dmdcode== "325481004"  
+replace oestrogen = 1 if dmdcode== "623311000001109"  
+replace oestrogen = 1 if dmdcode== "3876411000001107"  
+replace oestrogen = 1 if dmdcode== "3940511000001100"  
+replace oestrogen = 1 if dmdcode== "2893411000001103"  
+replace oestrogen = 1 if dmdcode== "546511000001102" 
+ 
+
+replace combined = 1 if dmdcode== "3215411000001100" 
+replace combined = 1 if dmdcode== "3353511000001108"  
+replace combined = 1 if dmdcode== "3216611000001107"  
+replace combined = 1 if dmdcode== "3449411000001106"  
+replace combined = 1 if dmdcode== "7340311000001105"  
+replace combined = 1 if dmdcode== "3040311000001103"  
+replace combined = 1 if dmdcode== "519311000001107"  
+replace combined = 1 if dmdcode== "4711811000001109"  
+replace combined = 1 if dmdcode== "3456711000001107"  
+replace combined = 1 if dmdcode== "3049911000001108"  
+replace combined = 1 if dmdcode== "3358411000001107"  
+replace combined = 1 if dmdcode== "3349811000001104"  
+replace combined = 1 if dmdcode== "335131100000110"  
+replace combined = 1 if dmdcode== "557911000001109"  
+replace combined = 1 if dmdcode== "3363611000001106"  
+replace combined = 1 if dmdcode== "4499111000001107"  
+replace combined = 1 if dmdcode== "3943111000001102"  
+replace combined = 1 if dmdcode== "4521511000001100"  
+replace combined = 1 if dmdcode== "3199011000001109"  
+replace combined = 1 if dmdcode== "679511000001100"  
+replace combined = 1 if dmdcode== "4338711000001100"  
+replace combined = 1 if dmdcode== "3217311000001104"  
+replace combined = 1 if dmdcode== "3347911000001102"  
+replace combined = 1 if dmdcode== "3780211000001102"  
+replace combined = 1 if dmdcode== "3043111000001107" 
+replace combined = 1 if dmdcode== "3210111000001102" 
+replace combined = 1 if dmdcode== "3779911000001106"  
+replace combined = 1 if dmdcode== "3355511000001103"  
+replace combined = 1 if dmdcode== "3942111000001108"  
+replace combined = 1 if dmdcode== "3453611000001109"  
+replace combined = 1 if dmdcode== "3367311000001108"  
+replace combined = 1 if dmdcode== "3470811000001103"  
+replace combined = 1 if dmdcode== "3853711000001105"  
+replace combined = 1 if dmdcode== "3038811000001109"  
+replace combined = 1 if dmdcode== "3049511000001101"  
+replace combined = 1 if dmdcode== "3346111000001103"    
+
+
+replace tibolone = 1 if dmdcode== "521411000001105"   
+
+
+** Want to end up with six categorical variables:  
+* Recent users (oestrogen only, combined HRT, tibolone; with duration-based categories) 
+* Past users (oestrogen only, combined HRT, tibolone; with duration-based categories) 
+
+gen time_since_last_hrt = (enter3-lastdate)/365.25 
+summ time_since_last_hrt, det  
+histogram time_since_last_hrt, percent 
+graph save "Graph" "graphs\HRT_time_since_last_hrt.gph", replace  
+
+* First, work on general oestrogen-only HRT group, then use this as the basis for more detailed groupings 
+** Generate a variable to identify if patients ever received at least 1 combined HRT script *  
+* Sum up number of times each patient had combined HRT. If they have a zero in 'evercombined', and have a record of having oestrogen-only HRT, then they are denoted as 'oestrogen_only_hrt' *  
+
+by patid: egen evercombined = sum(combined) 
+summ evercombined, det 
+gen oestrogen_only_hrt = 1 if (oestrogen==1 & evercombined==0)  
+
+* Combined HRT users  
+gen combined_hrt = 1 if evercombined!=0  
+count if oestrogen_only_hrt==1 & combined_hrt==1 
+
+* Tibolone users *  
+gen tibolone_hrt = 1 if tibolone==1  
+
+ 
+
+** Start sub-categorising each patient of basis of type of HRT, rececy of use, and duration of use **  
+gen recent_oestrogen = 1 if oestrogen_only_hrt==1 & time_since_last_hrt<5 
+replace recent_oestrogen = 1 if recent_oestrogen==1 & hrt_duration<1 
+replace recent_oestrogen = 2 if recent_oestrogen==1 & hrt_duration>=1 & hrt_duration<3 
+replace recent_oestrogen = 3 if recent_oestrogen==1 & hrt_duration>=3 & hrt_duration<5 
+replace recent_oestrogen = 4 if recent_oestrogen==1 & hrt_duration>=5 & hrt_duration<10 
+replace recent_oestrogen = 5 if recent_oestrogen==1 & hrt_duration>=10 
+tab recent_oestrogen 
+
+ 
+gen past_oestrogen = 1 if oestrogen_only_hrt==1 & time_since_last_hrt>=5   
+replace past_oestrogen = 1 if past_oestrogen==1 & hrt_duration<1 
+replace past_oestrogen = 2 if past_oestrogen==1 & hrt_duration>=1 & hrt_duration<3 
+replace past_oestrogen = 3 if past_oestrogen==1 & hrt_duration>=3 & hrt_duration<5 
+replace past_oestrogen = 4 if past_oestrogen==1 & hrt_duration>=5 & hrt_duration<10 
+replace past_oestrogen = 5 if past_oestrogen==1 & hrt_duration>=10 
+tab past_oestrogen 
+
+gen recent_combinedhrt = 1 if combined_hrt==1 & time_since_last_hrt<5  
+replace recent_combinedhrt = 1 if recent_combinedhrt==1 & hrt_duration<1 
+replace recent_combinedhrt = 2 if recent_combinedhrt==1 & hrt_duration>=1 & hrt_duration<3 
+replace recent_combinedhrt = 3 if recent_combinedhrt==1 & hrt_duration>=3 & hrt_duration<5 
+replace recent_combinedhrt = 4 if recent_combinedhrt==1 & hrt_duration>=5 & hrt_duration<10 
+replace recent_combinedhrt = 5 if recent_combinedhrt==1 & hrt_duration>=10 
+tab recent_combinedhrt 
+
+
+gen past_combinedhrt = 1 if combined_hrt==1 & time_since_last_hrt>=5  
+replace past_combinedhrt = 1 if past_combinedhrt==1 & hrt_duration<1 
+replace past_combinedhrt = 2 if past_combinedhrt==1 & hrt_duration>=1 & hrt_duration<3 
+replace past_combinedhrt = 3 if past_combinedhrt==1 & hrt_duration>=3 & hrt_duration<5 
+replace past_combinedhrt = 4 if past_combinedhrt==1 & hrt_duration>=5 & hrt_duration<10 
+replace past_combinedhrt = 5 if past_combinedhrt==1 & hrt_duration>=10 
+tab past_combinedhrt 
+
+
+gen recent_tibolone = 1 if tibolone_hrt==1 & time_since_last_hrt<5  
+replace recent_tibolone = 1 if recent_tibolone==1 & hrt_duration<1 
+replace recent_tibolone = 2 if recent_tibolone==1 & hrt_duration>=1 & hrt_duration<3 
+replace recent_tibolone = 3 if recent_tibolone==1 & hrt_duration>=3 & hrt_duration<5 
+replace recent_tibolone = 4 if recent_tibolone==1 & hrt_duration>=5 & hrt_duration<10 
+replace recent_tibolone = 5 if recent_tibolone==1 & hrt_duration>=10 
+tab recent_tibolone  
+
+gen past_tibolone = 1 if tibolone_hrt==1 & time_since_last_hrt>=5  
+replace past_tibolone = 1 if past_tibolone==1 & hrt_duration<1 
+replace past_tibolone = 2 if past_tibolone==1 & hrt_duration>=1 & hrt_duration<3 
+replace past_tibolone = 3 if past_tibolone==1 & hrt_duration>=3 & hrt_duration<5 
+replace past_tibolone = 4 if past_tibolone==1 & hrt_duration>=5 & hrt_duration<10 
+replace past_tibolone = 5 if past_tibolone==1 & hrt_duration>=10 
+tab past_tibolone  
+
+** Now, collapse down dataset to keep patid (for merging into main dataset), and new categories of HRT exposure *  
+keep patid recent_oestrogen past_oestrogen recent_combinedhrt past_combinedhrt past_tibolone recent_tibolone 
+duplicates drop patid, force 
+
+save "OX129_HRT_newclasses.dta", replace  
+clear  
+
+ 
+
+******************************************************************************** 
+
+*Sort out final dataset *  
+
+use "OX129_cohort2.dta"   // original skeleteon dataset – patids, enter and exist dates, death dates  
+count  
+
+ 
+* Merge in alcohol data *  
+merge 1:1 patid using "OX129_alcohol_clean.dta" 
+drop _merge  
+
+* Merge in smoking data * 
+merge 1:1 patid using “OX129_smoking_clean.dta" 
+drop _merge  
+
+* Merge in BMI data *  
+merge 1:1 patid using OX129_bmi_cleaned.dta" 
+drop _merge  
+
+* Merge in cleaned comorbidity/previous diagnoses data *  
+merge 1:1 patid using “OX129_final_diagnoses.dta" 
+drop _merge  
+
+* Excluding menopause data from modelling - as contains age *  
+drop menopause  
+
+* Merge in hysterectomy data *  
+merge 1:1 patid using "OX129_hysterectomy.dta" 
+drop _merge  
+
+* Merge in drugs records *  
+foreach x in 740 751 758 759 760 765 807 808 812 813 814 815 922 { 
+merge 1:1 patid using "OX129_drugs_`x'.dta" 
+drop _merge 
+} 
+
+
+* Rename drug variables for ease *  
+rename drug_740 thiazide 
+rename drug_751 betablocker 
+rename drug_758 raa
+rename drug_759 acei
+rename drug_760 a2a 
+rename drug_765 cablocker 
+rename drug_807 antipsychotic 
+rename drug_808 antipsychotic_depot 
+rename drug_812 tca 
+rename drug_813 maoi  
+rename drug_814 ssri  
+rename drug_815 otherantidepress 
+rename drug_922 ocp  
+
+
+** Drop all those with previously recorded breast carcinoma in situ or invasive breast cancer **  
+tab status6  
+tab breast_insitu  
+tab status6 breast_insitu 
+drop if status6==1 
+drop if breast_insitu==1 
+count  
+drop breast_insitu 
+drop breastca 
+
+** Input zeroes for comorbidities **  
+
+foreach x of varlist ckd t1dm t2dm pcos htn ihd lungca ovarianca uterineca bloodca thyroidca cirrhosis fh_ovarianca fh_uterineca fh_genitalca lupus vasculitis endometriosis psychosis fibrocystic endometrialca fh_breastca hysterectomy thiazide betablocker raa acei a2a cablocker antipsychotic antipsychotic_depot tca maoi ssri otherantidepress ocp {  
+replace `x' = 0 if `x'==. 
+} 
+
+** Save final cleaned cohort dataset **  
+save "OX129_cohort_final.dta", replace  
+
+******************************************************************************** 
+******************************************************************************** 
+clear all 
